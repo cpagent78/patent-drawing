@@ -270,8 +270,8 @@ class Drawing:
             est_gap = (gap or 1.10) * 0.5
             max_box_w = (BND_W - est_gap * (max_cols - 1)) / max_cols if max_cols > 0 else BND_W
         else:
-            # flow: edge 기반으로 최대 깊이(레이어 수) 추정
-            # 간단히: 소스(in_degree=0)에서 시작해서 최장 경로 길이+1
+            # flow: 레이어당 박스는 세로로 쌓이므로 가로 폭은 넉넉하게
+            # gap 분만 빼고 나머지를 박스 하나가 쓸 수 있음
             from collections import defaultdict
             _in_deg = defaultdict(int)
             _adj = defaultdict(list)
@@ -281,7 +281,6 @@ class Drawing:
             sources = [n for n in self._nodes if _in_deg[id(n)] == 0]
             if not sources:
                 sources = self._nodes[:1]
-            # BFS max depth
             from collections import deque
             max_depth = 1
             visited = set()
@@ -296,7 +295,10 @@ class Drawing:
                     q.append((nxt_id, depth + 1))
             est_layers = max(2, max_depth)
             est_gap = gap or 1.10
+            # flow: 같은 레이어의 박스들은 세로 배치 → 가로 폭 여유 있음
+            # 전체 폭에서 gap만 빼고 2줄 이내로 들어갈 수 있게 넓게 설정
             max_box_w = (BND_W - est_gap * (est_layers - 1)) / est_layers
+            max_box_w = max(max_box_w, 2.5)  # flow에서 최소 2.5" 보장 (2줄 이내)
 
         max_box_w = max(1.0, min(max_box_w, 3.0))  # 최소 1", 최대 3"
 
@@ -764,8 +766,9 @@ class Drawing:
         """
         텍스트 자동 word wrap. 모든 레이아웃 타입에서 공용으로 사용.
         - 첫 줄(참조번호)은 건드리지 않음
-        - 두 번째 줄부터 단어 단위로 max_w에 맞춰 줄바꿈
-        - max_w: 박스 최대 너비 (인치). 텍스트가 이 너비를 초과하면 wrap.
+        - 두 번째 줄부터 단어 단위로 줄바꿈
+        - 1단계: max_w 기준으로 wrap 시도
+        - 2단계: 한 줄이 max_w를 초과하면 균등 2분할 시도
 
         반환: wrap된 텍스트 (\\n 포함)
         """
@@ -774,31 +777,74 @@ class Drawing:
         if len(lines) < 2:
             return text
 
-        # 첫 줄(참조번호) 보존
         ref_line = lines[0]
-        body = ' '.join(lines[1:])  # 나머지를 하나로 합침
+        body = ' '.join(lines[1:])
         words = body.split()
 
         if not words:
             return text
 
-        # 패딩 고려 — 텍스트가 차지할 수 있는 실제 폭
+        # 본문 전체 폭 측정
+        body_w, _ = self.measure_text(body, fs)
         usable_w = max_w - 0.15
 
-        wrapped_lines = []
-        current_line = ''
-        for word in words:
-            test_line = f'{current_line} {word}'.strip() if current_line else word
-            tw, _ = self.measure_text(test_line, fs)
-            if tw > usable_w and current_line:
-                wrapped_lines.append(current_line)
-                current_line = word
-            else:
-                current_line = test_line
-        if current_line:
-            wrapped_lines.append(current_line)
+        if body_w <= usable_w:
+            # 한 줄에 들어감 → wrap 불필요
+            return ref_line + '\n' + body
 
-        return ref_line + '\n' + '\n'.join(wrapped_lines)
+        # 균등 분할: 본문을 N줄로 나눠서 가장 넓은 줄이 usable_w 이하가 되도록
+        best_lines = [body]  # fallback
+        for n_lines in range(2, len(words) + 1):
+            # 단어를 n_lines 줄로 분배
+            candidates = self._split_words_balanced(words, n_lines, fs)
+            max_line_w = max(self.measure_text(l, fs)[0] for l in candidates)
+            if max_line_w <= usable_w:
+                best_lines = candidates
+                break
+            # usable_w 없이도 2줄이면 충분히 좋음
+            if n_lines == 2:
+                best_lines = candidates
+
+        return ref_line + '\n' + '\n'.join(best_lines)
+
+    def _split_words_balanced(self, words, n_lines, fs):
+        """단어 리스트를 n_lines줄로 최대한 균등하게 분배."""
+        if n_lines >= len(words):
+            return words
+
+        if n_lines == 2:
+            # 모든 분할점을 시도해서 max(줄1폭, 줄2폭)이 최소인 지점 선택
+            best_split = 1
+            best_max_w = float('inf')
+            for i in range(1, len(words)):
+                line1 = ' '.join(words[:i])
+                line2 = ' '.join(words[i:])
+                w1, _ = self.measure_text(line1, fs)
+                w2, _ = self.measure_text(line2, fs)
+                max_w = max(w1, w2)
+                if max_w < best_max_w:
+                    best_max_w = max_w
+                    best_split = i
+            return [' '.join(words[:best_split]), ' '.join(words[best_split:])]
+
+        # 3줄 이상: greedy wrap
+        target_w_per_line = sum(self.measure_text(w, fs)[0] for w in words) / n_lines
+        result = []
+        current = ''
+        current_w = 0
+        for word in words:
+            ww, _ = self.measure_text(word, fs)
+            test_w = current_w + ww + (self.measure_text(' ', fs)[0] if current else 0)
+            if current and test_w > target_w_per_line * 1.2 and len(result) < n_lines - 1:
+                result.append(current)
+                current = word
+                current_w = ww
+            else:
+                current = f'{current} {word}'.strip() if current else word
+                current_w = test_w
+        if current:
+            result.append(current)
+        return result
 
     def measure_text(self, text, fs=None) -> tuple:
         """

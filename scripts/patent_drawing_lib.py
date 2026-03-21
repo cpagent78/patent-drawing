@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v7.1
+patent_drawing_lib.py  v7.2
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -253,6 +253,56 @@ class Drawing:
             rows      : bus 전용 — [[node, ...], [node, ...]] (위→아래 순)
             external  : bus 전용 — {'right': [node, ...]} 등
         """
+        # Step 0: 자동 word wrap (모든 레이아웃 타입 공용)
+        BND_W = 7.90 - 0.55 - 0.35 * 2  # boundary 내부 사용 가능 폭
+        all_layout_nodes = list(self._nodes)
+        if rows:
+            for row in rows:
+                all_layout_nodes.extend(row)
+        if external:
+            for ext_list in external.values():
+                all_layout_nodes.extend(ext_list)
+
+        # 노드 수 기반 max_w 추정
+        n_unique = len(set(id(n) for n in all_layout_nodes))
+        if mode == 'bus' and rows:
+            max_cols = max(len(row) for row in rows)
+            est_gap = (gap or 1.10) * 0.5
+            max_box_w = (BND_W - est_gap * (max_cols - 1)) / max_cols if max_cols > 0 else BND_W
+        else:
+            # flow: edge 기반으로 최대 깊이(레이어 수) 추정
+            # 간단히: 소스(in_degree=0)에서 시작해서 최장 경로 길이+1
+            from collections import defaultdict
+            _in_deg = defaultdict(int)
+            _adj = defaultdict(list)
+            for edge in self._edges:
+                _adj[id(edge[0])].append(id(edge[1]))
+                _in_deg[id(edge[1])] += 1
+            sources = [n for n in self._nodes if _in_deg[id(n)] == 0]
+            if not sources:
+                sources = self._nodes[:1]
+            # BFS max depth
+            from collections import deque
+            max_depth = 1
+            visited = set()
+            q = deque([(id(s), 1) for s in sources])
+            while q:
+                nid, depth = q.popleft()
+                if nid in visited:
+                    continue
+                visited.add(nid)
+                max_depth = max(max_depth, depth)
+                for nxt_id in _adj[nid]:
+                    q.append((nxt_id, depth + 1))
+            est_layers = max(2, max_depth)
+            est_gap = gap or 1.10
+            max_box_w = (BND_W - est_gap * (est_layers - 1)) / est_layers
+
+        max_box_w = max(1.0, min(max_box_w, 3.0))  # 최소 1", 최대 3"
+
+        for nd in all_layout_nodes:
+            nd.text = self._auto_wrap(nd.text, max_box_w, nd.fs)
+
         if mode == 'bus':
             return self._layout_bus(rows=rows, external=external,
                                     gap=gap, pad_x=pad_x, pad_y=pad_y,
@@ -709,6 +759,46 @@ class Drawing:
         사용: d.layer(0.55, 7.40, 7.95, 10.10, "EDGE LAYER  110")
         """
         self._cmds.append(('boundary', x1, y1, x2, y2, label, False))
+
+    def _auto_wrap(self, text, max_w, fs=None):
+        """
+        텍스트 자동 word wrap. 모든 레이아웃 타입에서 공용으로 사용.
+        - 첫 줄(참조번호)은 건드리지 않음
+        - 두 번째 줄부터 단어 단위로 max_w에 맞춰 줄바꿈
+        - max_w: 박스 최대 너비 (인치). 텍스트가 이 너비를 초과하면 wrap.
+
+        반환: wrap된 텍스트 (\\n 포함)
+        """
+        fs = fs or FS_BODY
+        lines = text.split('\n')
+        if len(lines) < 2:
+            return text
+
+        # 첫 줄(참조번호) 보존
+        ref_line = lines[0]
+        body = ' '.join(lines[1:])  # 나머지를 하나로 합침
+        words = body.split()
+
+        if not words:
+            return text
+
+        # 패딩 고려 — 텍스트가 차지할 수 있는 실제 폭
+        usable_w = max_w - 0.15
+
+        wrapped_lines = []
+        current_line = ''
+        for word in words:
+            test_line = f'{current_line} {word}'.strip() if current_line else word
+            tw, _ = self.measure_text(test_line, fs)
+            if tw > usable_w and current_line:
+                wrapped_lines.append(current_line)
+                current_line = word
+            else:
+                current_line = test_line
+        if current_line:
+            wrapped_lines.append(current_line)
+
+        return ref_line + '\n' + '\n'.join(wrapped_lines)
 
     def measure_text(self, text, fs=None) -> tuple:
         """

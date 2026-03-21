@@ -333,13 +333,23 @@ class Drawing:
                 pad_reduce = min(excess / len(self._nodes), pad_x - 0.10)
                 pad_x = max(0.10, pad_x - pad_reduce)
                 # 박스 크기 재계산
-                layer_widths = []
                 for layer in layers:
                     for nd in layer:
                         tw, th = self.measure_text(nd.text, nd.fs)
                         nd._w = tw + pad_x
                         nd._h = th + (pad_y or 0.14)
-                    layer_widths.append(max(nd._w for nd in layer))
+                # 재계산 후 레이어 내 크기 통일 재적용 (LR: max_w, TB: max_h)
+                if direction == 'LR':
+                    for layer in layers:
+                        max_w = max(nd._w for nd in layer)
+                        for nd in layer:
+                            nd._w = max_w
+                else:
+                    for layer in layers:
+                        max_h = max(nd._h for nd in layer)
+                        for nd in layer:
+                            nd._h = max_h
+                layer_widths = [max(nd._w for nd in layer) for layer in layers]
                 total_box_w = sum(layer_widths)
                 avail_for_gaps = CONTENT_W - total_box_w
             INTER_LAYER_GAP = max(MIN_INTER, min(gap, avail_for_gaps / n_gaps))

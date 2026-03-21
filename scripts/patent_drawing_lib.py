@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v7.0
+patent_drawing_lib.py  v7.1
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -227,22 +227,36 @@ class Drawing:
         """
         self._edges.append((src, dst, label, bidir))
 
-    def layout(self, direction='LR', gap=1.10, pad_x=None, pad_y=None,
-               boundary_label=""):
+    def layout(self, mode='flow', direction='LR', gap=1.10, pad_x=None, pad_y=None,
+               boundary_label="",
+               # bus mode 전용
+               rows=None, external=None):
         """
         Graph-first 레이아웃 실행.
-        1. 모든 노드 텍스트 크기 측정
-        2. 엣지 기반 레이어(rank) 계산 (Kahn's topological sort)
-        3. 같은 레이어 내 수직 정렬, 레이어 간 수평 배치 (LR) 또는 반대 (TB)
-        4. boundary 자동 계산
-        5. box() / arrow_route() 자동 호출
+
+        mode='flow': 방향성 흐름도 (FIG.1 스타일)
+            1. 모든 노드 텍스트 크기 측정
+            2. 엣지 기반 레이어 계산 (topological sort)
+            3. 레이어 간 배치 + 화살표 자동 생성
+
+        mode='bus': 버스 연결 블록 다이어그램 (FIG.2 스타일)
+            1. rows로 행 배치 정의 (상단/하단)
+            2. 중앙 수평 버스선 + 각 박스 수직 양방향 연결
+            3. external로 버스 외부 노드 연결
 
         Args:
-            direction: 'LR' (좌→우, 기본) | 'TB' (위→아래)
-            gap      : 박스 간 화살표 gap (기본 0.55")
-            pad_x    : 박스 좌우 텍스트 패딩 (기본 0.20")
-            pad_y    : 박스 상하 텍스트 패딩 (기본 0.14")
+            mode      : 'flow' | 'bus'
+            direction : 'LR' | 'TB' (flow 전용)
+            gap       : 박스 간 gap (기본 1.10")
+            pad_x/y   : 텍스트 패딩
+            boundary_label: boundary 라벨
+            rows      : bus 전용 — [[node, ...], [node, ...]] (위→아래 순)
+            external  : bus 전용 — {'right': [node, ...]} 등
         """
+        if mode == 'bus':
+            return self._layout_bus(rows=rows, external=external,
+                                    gap=gap, pad_x=pad_x, pad_y=pad_y,
+                                    boundary_label=boundary_label)
         if not self._nodes:
             return
 
@@ -502,6 +516,184 @@ class Drawing:
                     else:
                         self.arrow_route(pts, label=lbl)
 
+        self.fig_label()
+
+    def _layout_bus(self, rows=None, external=None, gap=1.10,
+                    pad_x=None, pad_y=None, boundary_label=""):
+        """
+        버스 레이아웃: 중앙 수평 버스선 + 상/하 행 배치.
+        rows: [[node, ...], [node, ...]] — 위→아래 순
+        external: {'right': [node, ...], 'left': [...]} — 버스 외부 연결
+        """
+        if not rows:
+            return
+
+        pad_x = pad_x or 0.20
+        pad_y = pad_y or 0.14
+        external = external or {}
+
+        # Step 1: 모든 노드 크기 측정
+        all_nodes = []
+        for row in rows:
+            all_nodes.extend(row)
+        for side_nodes in external.values():
+            all_nodes.extend(side_nodes)
+
+        for nd in all_nodes:
+            tw, th = self.measure_text(nd.text, nd.fs)
+            nd._w = tw + (nd.pad_x if nd.pad_x else pad_x)
+            nd._h = th + (nd.pad_y if nd.pad_y else pad_y)
+
+        # Step 1b: 같은 행 내 높이 통일
+        for row in rows:
+            if row:
+                max_h = max(nd._h for nd in row)
+                for nd in row:
+                    nd._h = max_h
+
+        # 행 내 너비 통일 (행 간은 다를 수 있음 — 공간 확보)
+        for row in rows:
+            if row:
+                max_w = max(nd._w for nd in row)
+                for nd in row:
+                    nd._w = max_w
+
+        # Step 2: 레이아웃 계산
+        BND_X1, BND_Y1, BND_X2, BND_Y2 = 0.55, 1.10, 7.90, 10.15
+        INNER_PAD = 0.35
+        CONTENT_W = BND_X2 - BND_X1 - INNER_PAD * 2
+        CONTENT_H = BND_Y2 - BND_Y1 - INNER_PAD * 2
+        content_cx = (BND_X1 + BND_X2) / 2
+        content_cy = (BND_Y1 + BND_Y2) / 2
+
+        BOX_GAP_H = gap * 0.5   # 같은 행 내 수평 간격
+        BOX_GAP_V = gap * 0.6   # 버스↔박스 수직 간격
+        BUS_SPACE = 0.15         # 버스선 두께 공간
+
+        # 가장 넓은 행 기준으로 전체 폭 계산
+        row_widths = []
+        for row in rows:
+            rw = sum(nd._w for nd in row) + BOX_GAP_H * (len(row) - 1)
+            row_widths.append(rw)
+        max_row_w = max(row_widths) if row_widths else 0
+
+        # external 노드 공간
+        ext_right_w = 0
+        if 'right' in external and external['right']:
+            ext_right_w = max(nd._w for nd in external['right']) + gap * 0.6
+        ext_left_w = 0
+        if 'left' in external and external['left']:
+            ext_left_w = max(nd._w for nd in external['left']) + gap * 0.6
+
+        total_w = max_row_w + ext_right_w + ext_left_w
+
+        # 페이지 초과 시 gap 축소
+        if total_w > CONTENT_W:
+            scale = CONTENT_W / total_w
+            BOX_GAP_H *= scale
+            total_w = CONTENT_W
+
+        # 버스 y 좌표 (중앙)
+        bus_y = content_cy
+
+        # 행 배치: 위→아래 순으로 rows[0]이 가장 위
+        n_rows = len(rows)
+        # rows[0]: 버스 위, rows[1]: 버스 아래, rows[2+]: 더 아래...
+        row_ys = []
+        if n_rows == 1:
+            row_ys = [bus_y + BOX_GAP_V + rows[0][0]._h / 2]
+        elif n_rows == 2:
+            row_ys = [
+                bus_y + BOX_GAP_V + rows[0][0]._h / 2,  # 위
+                bus_y - BOX_GAP_V - rows[1][0]._h / 2,  # 아래
+            ]
+        else:
+            # 3행 이상
+            for i in range(n_rows):
+                if i == 0:
+                    row_ys.append(bus_y + BOX_GAP_V + rows[0][0]._h / 2)
+                else:
+                    prev_h = rows[i-1][0]._h if rows[i-1] else 0.5
+                    row_ys.append(row_ys[-1] - prev_h / 2 - BOX_GAP_V - rows[i][0]._h / 2)
+
+        # 내부 박스 left edge 시작 x
+        internal_start_x = content_cx - max_row_w / 2 + ext_left_w / 2 - ext_right_w / 2
+
+        # Step 3: 박스 배치
+        for ri, row in enumerate(rows):
+            row_w = sum(nd._w for nd in row) + BOX_GAP_H * (len(row) - 1)
+            start_x = content_cx - row_w / 2 + ext_left_w / 2 - ext_right_w / 2
+            cur_x = start_x
+            cy = row_ys[ri]
+            for nd in row:
+                box_x = cur_x
+                box_y = cy - nd._h / 2
+                nd.box_ref = self.box(box_x, box_y, nd._w, nd._h, nd.text, nd.fs)
+                cur_x += nd._w + BOX_GAP_H
+
+        # Step 4: 버스선 그리기
+        # 버스 범위: 가장 왼쪽 박스 cx ~ 가장 오른쪽 박스 cx
+        all_internal = [nd for row in rows for nd in row if nd.box_ref]
+        if all_internal:
+            bus_left  = min(nd.box_ref.cx for nd in all_internal) - 0.20
+            bus_right = max(nd.box_ref.cx for nd in all_internal) + 0.20
+
+            # external right 있으면 버스 연장
+            if 'right' in external and external['right']:
+                ext_nd = external['right'][0]
+                # bus_right는 gen2.cx + 0.20, ext까지 최소 0.50" gap
+                ext_gap = max(0.70, gap * 0.6)
+                max_ext_right = BND_X2 - INNER_PAD
+                ext_x = min(bus_right + ext_gap, max_ext_right - ext_nd._w)
+                ext_y = bus_y - ext_nd._h / 2
+                ext_nd.box_ref = self.box(ext_x, ext_y, ext_nd._w, ext_nd._h,
+                                          ext_nd.text, ext_nd.fs)
+                bus_right_end = ext_nd.box_ref.left - 0.10
+
+            if 'left' in external and external['left']:
+                ext_nd = external['left'][0]
+                ext_gap = max(0.55, gap * 0.5)
+                min_ext_left = BND_X1 + INNER_PAD
+                ext_x = max(bus_left - ext_gap - ext_nd._w, min_ext_left)
+                ext_y = bus_y - ext_nd._h / 2
+                ext_nd.box_ref = self.box(ext_x, ext_y, ext_nd._w, ext_nd._h,
+                                          ext_nd.text, ext_nd.fs)
+                bus_left = ext_nd.box_ref.right + 0.10
+
+            # 버스선 (수평)
+            self.line(bus_left, bus_y, bus_right, bus_y)
+
+        # Step 5: 각 박스 → 버스 수직 연결선 (화살촉 없는 연결 — 버스 접속)
+        for ri, row in enumerate(rows):
+            for nd in row:
+                if nd.box_ref is None:
+                    continue
+                b = nd.box_ref
+                if ri == 0:  # 상단 행: 박스 아래 → 버스
+                    self.line(b.cx, b.bot, b.cx, bus_y)
+                else:  # 하단 행: 버스 → 박스 위
+                    self.line(b.cx, bus_y, b.cx, b.top)
+
+        # Step 6: 버스 → external 수평 양방향 화살표
+        for side, ext_nodes in external.items():
+            for ext_nd in ext_nodes:
+                if ext_nd.box_ref is None:
+                    continue
+                eb = ext_nd.box_ref
+                if side == 'right':
+                    # bus_right는 external 배치 전 값, arrow는 ext와 연결
+                    self.arrow_route([
+                        (bus_right, bus_y),
+                        ext_nd.box_ref.left_mid(),
+                    ])
+                elif side == 'left':
+                    self.arrow_route([
+                        ext_nd.box_ref.right_mid(),
+                        (bus_left, bus_y),
+                    ])
+
+        # Step 7: boundary
+        self.boundary(BND_X1, BND_Y1, BND_X2, BND_Y2, label=boundary_label)
         self.fig_label()
 
     # ── 요소 추가 ─────────────────────────────────────────────────────────────

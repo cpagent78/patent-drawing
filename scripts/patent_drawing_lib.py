@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v7.3
+patent_drawing_lib.py  v7.4
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -592,6 +592,7 @@ class Drawing:
                     else:
                         self.arrow_route(pts, label=lbl)
 
+        self._center_all_boxes()
         self.fig_label()
 
     def _layout_bus(self, rows=None, external=None, gap=1.10,
@@ -837,6 +838,7 @@ class Drawing:
 
         # Step 7: 페이지 boundary (라벨 없음 — internal에 이미 boundary_label)
         self.boundary(BND_X1, BND_Y1, BND_X2, BND_Y2)
+        self._center_all_boxes()
         self.fig_label()
 
     # ── 요소 추가 ─────────────────────────────────────────────────────────────
@@ -936,6 +938,56 @@ class Drawing:
         if current:
             result.append(current)
         return result
+
+    def _center_all_boxes(self):
+        """
+        공용 중앙 정렬: 모든 배치된 박스의 min_left ~ max_right 기준으로
+        페이지 수평 중앙에 오도록 전체 shift.
+        모든 레이아웃 타입에서 배치 완료 후 호출.
+        """
+        if not self._box_refs:
+            return
+        min_left  = min(b.left for b in self._box_refs)
+        max_right = max(b.right for b in self._box_refs)
+        content_cx = (min_left + max_right) / 2
+        page_cx = PAGE_W / 2
+        dx = page_cx - content_cx
+
+        if abs(dx) < 0.01:
+            return  # 이미 중앙
+
+        # 모든 박스 x 좌표 shift
+        for b in self._box_refs:
+            b.x += dx
+
+        # 모든 cmd 좌표도 shift (boundary, route, bidir, line, label, fig_label)
+        new_cmds = []
+        for cmd in self._cmds:
+            if cmd[0] == 'boundary':
+                _, x1, y1, x2, y2, lbl, is_page = cmd
+                if is_page:
+                    new_cmds.append(cmd)  # 페이지 boundary는 고정
+                else:
+                    new_cmds.append(('boundary', x1 + dx, y1, x2 + dx, y2, lbl, is_page))
+            elif cmd[0] == 'box':
+                new_cmds.append(cmd)  # BoxRef가 이미 shift됨, 렌더링 시 b.x 참조
+            elif cmd[0] == 'route':
+                _, pts, lbl, lpos, lopt, *rest = cmd
+                new_pts = [(x + dx, y) for x, y in pts]
+                new_cmds.append(('route', new_pts, lbl, lpos, lopt, *rest))
+            elif cmd[0] == 'bidir':
+                _, pts = cmd
+                new_pts = [(x + dx, y) for x, y in pts]
+                new_cmds.append(('bidir', new_pts))
+            elif cmd[0] == 'line':
+                _, x1, y1, x2, y2, ls = cmd
+                new_cmds.append(('line', x1 + dx, y1, x2 + dx, y2, ls))
+            elif cmd[0] == 'label':
+                _, x, y, text, ha, fs = cmd
+                new_cmds.append(('label', x + dx, y, text, ha, fs))
+            else:
+                new_cmds.append(cmd)
+        self._cmds = new_cmds
 
     def measure_text(self, text, fs=None) -> tuple:
         """

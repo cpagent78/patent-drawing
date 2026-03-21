@@ -724,15 +724,29 @@ class Drawing:
         internal_start_x = content_cx - max_row_w / 2 + ext_left_w / 2 - ext_right_w / 2
 
         # Step 3: 박스 배치
-        # 내부 영역 사용 가능 범위: page boundary + 점선여백 확보
-        INT_BND_MARGIN = 0.20  # 점선↔page boundary 여백
-        int_area_left  = BND_X1 + INT_BND_MARGIN + BND_PAD  # 점선 안쪽 시작
-        int_area_right = BND_X2 - INNER_PAD - ext_right_w   # ext 공간 차감
-        internal_cx = (int_area_left + int_area_right) / 2
+        # 전체 콘텐츠(100점선+gap+60블록) 기준 중앙 정렬
+        # 전체 폭 = BND_PAD + internal_row_w + BND_PAD + ext_gap + ext_w
+        #           ^^^^^^^^ 점선 내부 왼쪽여백  ^^^^^^^^ 점선 내부 오른쪽여백
+        EXT_GAP = BND_PAD + 0.50  # 점선↔ext 간격 (점선 오른쪽 + shaft)
+
+        # ext 너비
+        ext_w_total = 0
+        if 'right' in external and external['right']:
+            ext_w_total = max(nd._w for nd in external['right'])
+        elif 'left' in external and external['left']:
+            ext_w_total = max(nd._w for nd in external['left'])
+
+        total_content_w = BND_PAD + max_row_w + BND_PAD + EXT_GAP + ext_w_total
+        # 전체 콘텐츠를 페이지 boundary 안에서 중앙 정렬
+        total_left = content_cx - total_content_w / 2
+        # internal 박스 시작 x: total_left + 점선왼쪽여백
+        internal_start_x = total_left + BND_PAD
 
         for ri, row in enumerate(rows):
             row_w = sum(nd._w for nd in row) + BOX_GAP_H * (len(row) - 1)
-            start_x = internal_cx - row_w / 2
+            # 행 내 중앙 정렬 (internal 영역 기준)
+            internal_cx_local = internal_start_x + max_row_w / 2
+            start_x = internal_cx_local - row_w / 2
             cur_x = start_x
             cy = row_ys[ri]
             for nd in row:
@@ -766,10 +780,8 @@ class Drawing:
 
             if 'right' in external and external['right']:
                 ext_nd = external['right'][0]
-                # ext_x: int_right(점선 우측) + EXT_BND_GAP + 화살표 shaft(0.50)
+                # ext_x: int_right + 점선외부여백 + shaft
                 ext_x = int_right + EXT_BND_GAP + 0.50
-                max_ext_right = BND_X2 - INNER_PAD
-                ext_x = min(ext_x, max_ext_right - ext_nd._w)
                 ext_y = bus_y - ext_nd._h / 2
                 ext_nd.box_ref = self.box(ext_x, ext_y, ext_nd._w, ext_nd._h,
                                           ext_nd.text, ext_nd.fs)

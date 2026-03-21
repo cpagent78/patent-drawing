@@ -267,8 +267,15 @@ class Drawing:
         n_unique = len(set(id(n) for n in all_layout_nodes))
         if mode == 'bus' and rows:
             max_cols = max(len(row) for row in rows)
-            est_gap = (gap or 1.10) * 0.5
-            max_box_w = (BND_W - est_gap * (max_cols - 1)) / max_cols if max_cols > 0 else BND_W
+            est_gap = (gap or 1.10) * 0.4
+            # external 공간 미리 차감
+            ext_reserve_est = 0
+            if external:
+                for ext_list in external.values():
+                    # 대략 ext 박스 1.5" + 점선통과(0.30*2) + shaft(0.50)
+                    ext_reserve_est += 2.60
+            avail_for_internal = BND_W - ext_reserve_est
+            max_box_w = (avail_for_internal - est_gap * (max_cols - 1)) / max_cols if max_cols > 0 else BND_W
         else:
             # flow: 레이어당 박스는 세로로 쌓이므로 가로 폭은 넉넉하게
             # gap 분만 빼고 나머지를 박스 하나가 쓸 수 있음

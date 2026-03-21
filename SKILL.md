@@ -24,9 +24,12 @@ from patent_drawing_lib import Drawing
 d = Drawing("fig1.png", fig_num="1")
 d.boundary(0.55, 1.10, 7.90, 10.15, label='1000')
 
-# ✅ 참조번호는 반드시 첫 줄, 그 뒤에 개행(\n)
-b1 = d.box(2.0, 8.5, 4.0, 0.7, '100\nMy Component')
-b2 = d.box(2.0, 7.3, 4.0, 0.7, '200\nNext Component')
+# ✅ autobox: 텍스트 크기에 맞춰 박스 자동 결정 (권장)
+b1 = d.autobox(2.0, 8.5, '100\nMy Component')
+b2 = d.autobox(2.0, 7.3, '200\nNext Component')
+
+# box: 크기 직접 지정 (레이아웃 강제 시)
+# b1 = d.box(2.0, 8.5, 4.0, 0.7, '100\nMy Component')
 
 d.arrow_v(b1, b2)
 d.save()  # 자동 검증 + 저장
@@ -126,7 +129,9 @@ d.save()  # 자동 검증 + 저장
 |--------|------|
 | `Drawing(filename, fig_num)` | 새 도면 생성 |
 | `boundary(x1,y1,x2,y2,label)` | 전체 시스템 경계 (dashed) |
-| `box(x,y,w,h,text,fs)` | 박스 + 텍스트 (→ BoxRef) |
+| `autobox(x,y,text,fs,pad_x,pad_y)` | **텍스트 실측 후 박스 크기 자동 결정** (권장) |
+| `box(x,y,w,h,text,fs)` | 박스 + 텍스트, 크기 직접 지정 (→ BoxRef) |
+| `measure_text(text,fs)` | 텍스트 렌더링 크기 측정 → (width_in, height_in) |
 | `arrow_v(src,dst,label)` | 수직 직선 화살표 |
 | `arrow_h(src,dst,label)` | 수평 직선 화살표 |
 | `arrow_route(steps,label,label_pos)` | 꺾인 화살표 |

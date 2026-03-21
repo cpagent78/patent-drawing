@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v5.4
+patent_drawing_lib.py  v5.5
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -16,6 +16,11 @@ USPTO-Compliant Patent Drawing Library
         - arrow_bidir(): 직선 양방향 (단일 선 양쪽 화살촉)
         - arrow_bidir_route(): elbow 양방향
         - 양방향 elbow 규칙: 각 연결마다 전용 채널 x
+
+  v5.5  autobox() 추가 — 텍스트 크기 기반 박스 자동 크기 결정:
+        - autobox(x, y, text, fs, pad_x, pad_y): 텍스트를 실측 후 박스 w/h 자동 계산
+        - 기존 box()는 유지 (좌표+크기 직접 지정 시)
+        - 설계 원칙: 폰트에 맞춰 박스 크기 결정 (반대로 하지 말 것)
 
   v5.4  텍스트 박스 초과 감지 추가:
         - validate: 텍스트가 박스 경계를 벗어나는지 실측 검증
@@ -161,6 +166,51 @@ class Drawing:
         사용: d.layer(0.55, 7.40, 7.95, 10.10, "EDGE LAYER  110")
         """
         self._cmds.append(('boundary', x1, y1, x2, y2, label, False))
+
+    def measure_text(self, text, fs=None) -> tuple:
+        """
+        텍스트를 실제 렌더링하여 크기(인치)를 반환.
+        반환: (width_in, height_in)
+        """
+        fs = fs or FS_BODY
+        # visible=True로 렌더링 후 크기 측정, 이후 제거
+        t = self.ax.text(0, 0, text, fontsize=fs, fontweight=FW,
+                         multialignment='center',
+                         transform=self.ax.transData, visible=True)
+        self.fig.canvas.draw()
+        try:
+            renderer = self.fig.canvas.get_renderer()
+            bb = t.get_window_extent(renderer=renderer)
+            tw = bb.width / self.dpi
+            th = bb.height / self.dpi
+        except Exception:
+            # fallback: 글자 수 기반 근사값
+            lines = text.split('\n')
+            max_chars = max(len(l) for l in lines)
+            tw = max_chars * fs * 0.6 / 72
+            th = len(lines) * fs * 1.2 / 72
+        t.remove()
+        return (tw, th)
+
+    def autobox(self, x, y, text, fs=None, pad_x=0.20, pad_y=0.14) -> BoxRef:
+        """
+        텍스트 크기를 실측 후 박스 w/h 자동 결정.
+        폰트 크기에 맞춰 박스 크기가 결정됨 (반대로 하지 말 것).
+
+        Args:
+            x, y   : 박스 좌하단 좌표 (인치)
+            text   : 박스 텍스트 (첫 줄 참조번호 + \\n)
+            fs     : 폰트 크기 (기본 10pt, 고정됨 — 축소 없음)
+            pad_x  : 좌우 여백 합계 (기본 0.20")
+            pad_y  : 상하 여백 합계 (기본 0.14")
+        Returns:
+            BoxRef (w, h 자동 결정됨)
+        """
+        fs = fs or FS_BODY
+        tw, th = self.measure_text(text, fs)
+        w = tw + pad_x
+        h = th + pad_y
+        return self.box(x, y, w, h, text, fs)
 
     def box(self, x, y, w, h, text, fs=None) -> BoxRef:
         """

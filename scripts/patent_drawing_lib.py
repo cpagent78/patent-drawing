@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v5.2
+patent_drawing_lib.py  v5.3
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -16,6 +16,11 @@ USPTO-Compliant Patent Drawing Library
         - arrow_bidir(): 직선 양방향 (단일 선 양쪽 화살촉)
         - arrow_bidir_route(): elbow 양방향
         - 양방향 elbow 규칙: 각 연결마다 전용 채널 x
+
+  v5.3  USPTO 규칙 추가 코드화 (LLM 몫 → 코드로):
+        - validate: 텍스트 최소 10pt 미달 경고 (auto-fit 결과 기준)
+        - validate: 특수기호/유니코드 아래첨자 감지
+        - validate: 박스 참조번호 완전 누락 감지
 
   v5.2  코드 자동화 강화 (LLM 실수 방지):
         - validate: dead-end 박스 감지 (입력↑ 출력=0인 중간 박스)
@@ -658,6 +663,57 @@ class Drawing:
                         issues.append(
                             f'Labeled arrow "{lbl}" segment too short ({seg_len:.2f}"). '
                             f'Need {MIN_LABELED}" for label visibility.')
+
+        # 9a. 텍스트 최소 10pt 검증 (§1.84(p)(3))
+        MIN_FS = 10.0
+        for cmd in self._cmds:
+            if cmd[0] == 'box':
+                _, b, text, fs_override = cmd
+                fs_start = fs_override or FS_BODY
+                fs_result = self._fit_font(text, b.w - 0.18, b.h - 0.10, fs_start)
+                if fs_result < MIN_FS - 0.5:
+                    short = text[:30].replace('\n', ' ')
+                    issues.append(
+                        f'Box "{short}": font auto-fit to {fs_result:.1f}pt < 10pt min (§1.84(p)(3)). '
+                        f'Increase box size or shorten text.')
+
+        # 9b. 특수기호 / 유니코드 아래첨자 감지
+        SPECIAL_CHARS = ['★', '☆', '©', '®', '™', '°', '±', '×', '÷', '→', '←', '↑', '↓',
+                         '①', '②', '③', '④', '⑤', '❶', '❷', '❸']
+        SUBSCRIPT_CHARS = 'ₐₑₒₓₔₕₖₗₘₙₚₛₜ₀₁₂₃₄₅₆₇₈₉'
+        SUPERSCRIPT_CHARS = 'ⁿ⁰¹²³⁴⁵⁶⁷⁸⁹'
+        for cmd in self._cmds:
+            if cmd[0] == 'box':
+                _, b, text, _ = cmd
+                short = text[:30].replace('\n', ' ')
+                for ch in SPECIAL_CHARS:
+                    if ch in text:
+                        issues.append(
+                            f'Box "{short}": special char "{ch}" may not print safely. '
+                            f'Replace with plain text.')
+                for ch in text:
+                    if ch in SUBSCRIPT_CHARS:
+                        issues.append(
+                            f'Box "{short}": unicode subscript "{ch}" found. '
+                            f'Use plain ASCII (e.g. t1 instead of t₁).')
+                    if ch in SUPERSCRIPT_CHARS:
+                        issues.append(
+                            f'Box "{short}": unicode superscript "{ch}" found. '
+                            f'Use plain ASCII.')
+
+        # 9c. 박스 참조번호 완전 누락 감지
+        # 박스 텍스트 첫 줄이 3~4자리 숫자가 아니면 참조번호 없는 것으로 간주
+        REF_FIRST_LINE = re.compile(r'^\d{3,4}$')
+        for cmd in self._cmds:
+            if cmd[0] == 'box':
+                _, b, text, _ = cmd
+                short = text[:30].replace('\n', ' ')
+                lines = text.strip().split('\n')
+                first_line = lines[0].strip() if lines else ''
+                if not REF_FIRST_LINE.match(first_line):
+                    issues.append(
+                        f'Box "{short}": no reference number on first line. '
+                        f'Add ref num as first line + \\n (e.g. "100\\nMy Component").')
 
         # 9. Dead-end 박스 감지
         # 들어오는 화살표가 하나 이상 있고 나가는 화살표가 없는 중간 박스는 dead-end

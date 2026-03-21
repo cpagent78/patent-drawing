@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v5.5
+patent_drawing_lib.py  v6.0
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -16,6 +16,21 @@ USPTO-Compliant Patent Drawing Library
         - arrow_bidir(): 직선 양방향 (단일 선 양쪽 화살촉)
         - arrow_bidir_route(): elbow 양방향
         - 양방향 elbow 규칙: 각 연결마다 전용 채널 x
+
+  v6.0  Graph-first API 추가:
+        - NodeDef: 텍스트만 정의하는 노드 클래스
+        - Drawing.node(text): 노드 등록 → NodeDef 반환
+        - Drawing.connect(src, dst, label): 엣지 등록
+        - Drawing.layout(direction='LR'|'TB'): 크기 측정 → 레이어 배치 → 렌더
+          · direction='LR': 좌→우 계층형 (기본)
+          · direction='TB': 위→아래 계층형
+          · 화살표 간격 자동 확보 (0.50" gap)
+          · boundary 자동 계산 (박스 영역 + 0.50" 여백)
+        - 기존 box()/arrow_route() 등 수동 API 완전 유지
+
+  v5.6  measure_text() 픽셀→인치 변환 수정:
+        - axes.transData.inverted()로 data coordinate 기준 실측 (정확)
+        - 기존 bb.width/dpi 방식은 axes padding 때문에 과소 측정됨
 
   v5.5  autobox() 추가 — 텍스트 크기 기반 박스 자동 크기 결정:
         - autobox(x, y, text, fs, pad_x, pad_y): 텍스트를 실측 후 박스 w/h 자동 계산
@@ -88,6 +103,29 @@ Z_SEC_LABEL = 21
 Z_FIG_LABEL = 22
 
 
+# ── NodeDef ───────────────────────────────────────────────────────────────────
+class NodeDef:
+    """
+    Graph-first API에서 사용하는 노드 정의.
+    텍스트만 보유; 크기/위치는 layout() 시 결정됨.
+    layout() 완료 후 .box_ref로 BoxRef 접근 가능.
+    """
+    def __init__(self, text, fs=None, pad_x=0.20, pad_y=0.14):
+        self.text   = text
+        self.fs     = fs
+        self.pad_x  = pad_x
+        self.pad_y  = pad_y
+        self.box_ref: 'BoxRef | None' = None  # layout() 후 설정
+
+    # layout() 후 BoxRef 속성 위임
+    def __getattr__(self, name):
+        if name == 'box_ref':
+            raise AttributeError('box_ref not set — call layout() first')
+        if self.box_ref is not None:
+            return getattr(self.box_ref, name)
+        raise AttributeError(f"NodeDef.{name} not available before layout()")
+
+
 # ── BoxRef ────────────────────────────────────────────────────────────────────
 class BoxRef:
     def __init__(self, x, y, w, h):
@@ -145,6 +183,9 @@ class Drawing:
         self._cmds     = []
         self._box_refs = []
         self._box_text_sizes = {}  # id(BoxRef) → (tw_in, th_in) 실측 텍스트 크기
+        # Graph-first API
+        self._nodes: list['NodeDef'] = []
+        self._edges: list[tuple] = []  # (src_NodeDef, dst_NodeDef, label)
 
         self.fig, self.ax = plt.subplots(figsize=(PAGE_W, PAGE_H))
         self.ax.set_xlim(0, PAGE_W)
@@ -152,6 +193,211 @@ class Drawing:
         self.ax.axis('off')
         self.fig.patch.set_facecolor('white')
         self.ax.set_facecolor('white')
+
+    # ── Graph-first API ───────────────────────────────────────────────────────
+
+    def node(self, text, fs=None, pad_x=0.20, pad_y=0.14) -> 'NodeDef':
+        """
+        노드 등록. 텍스트만 정의; 크기/위치는 layout() 시 자동 결정.
+        반환된 NodeDef는 layout() 후 BoxRef처럼 사용 가능.
+
+        사용:
+            exhibitor = d.node('110\\nexhibitor')
+            network   = d.node('130\\nwired/wireless\\ncommunication network')
+        """
+        nd = NodeDef(text, fs=fs, pad_x=pad_x, pad_y=pad_y)
+        self._nodes.append(nd)
+        return nd
+
+    def connect(self, src: 'NodeDef', dst: 'NodeDef', label=""):
+        """
+        엣지 등록 (src → dst).
+        layout() 전에 호출; 실제 화살표는 layout() 시 생성.
+
+        사용:
+            d.connect(exhibitor, network)
+            d.connect(network, device, label='request')
+        """
+        self._edges.append((src, dst, label))
+
+    def layout(self, direction='LR', gap=1.10, pad_x=None, pad_y=None):
+        """
+        Graph-first 레이아웃 실행.
+        1. 모든 노드 텍스트 크기 측정
+        2. 엣지 기반 레이어(rank) 계산 (Kahn's topological sort)
+        3. 같은 레이어 내 수직 정렬, 레이어 간 수평 배치 (LR) 또는 반대 (TB)
+        4. boundary 자동 계산
+        5. box() / arrow_route() 자동 호출
+
+        Args:
+            direction: 'LR' (좌→우, 기본) | 'TB' (위→아래)
+            gap      : 박스 간 화살표 gap (기본 0.55")
+            pad_x    : 박스 좌우 텍스트 패딩 (기본 0.20")
+            pad_y    : 박스 상하 텍스트 패딩 (기본 0.14")
+        """
+        if not self._nodes:
+            return
+
+        pad_x = pad_x or 0.20
+        pad_y = pad_y or 0.14
+
+        # Step 1: 크기 측정
+        for nd in self._nodes:
+            tw, th = self.measure_text(nd.text, nd.fs)
+            nd._w = tw + (nd.pad_x if nd.pad_x else pad_x)
+            nd._h = th + (nd.pad_y if nd.pad_y else pad_y)
+
+        # Step 2: 레이어 계산 (Kahn's algorithm)
+        from collections import defaultdict, deque
+        in_degree = defaultdict(int)
+        adj = defaultdict(list)
+        node_set = set(id(n) for n in self._nodes)
+
+        for src, dst, _ in self._edges:
+            adj[id(src)].append(dst)
+            in_degree[id(dst)] += 1
+
+        queue = deque([n for n in self._nodes if in_degree[id(n)] == 0])
+        layers = []  # layers[i] = [NodeDef, ...]
+        layer_of = {}  # id(nd) → layer index
+
+        while queue:
+            layer_nodes = list(queue)
+            queue.clear()
+            layers.append(layer_nodes)
+            for nd in layer_nodes:
+                layer_of[id(nd)] = len(layers) - 1
+                for nxt in adj[id(nd)]:
+                    in_degree[id(nxt)] -= 1
+                    if in_degree[id(nxt)] == 0:
+                        queue.append(nxt)
+
+        # 레이어에 속하지 않은 노드 마지막에 추가
+        assigned = set(id(n) for layer in layers for n in layer)
+        orphans = [n for n in self._nodes if id(n) not in assigned]
+        if orphans:
+            layers.append(orphans)
+
+        # Step 3: 위치 계산
+        BND_MARGIN = 0.55  # boundary 여백
+        INTER_LAYER_GAP = gap   # 레이어 간 gap
+        INTRA_LAYER_GAP = gap * 0.8  # 같은 레이어 내 수직 gap
+
+        if direction == 'LR':
+            # 각 레이어의 최대 너비 계산
+            layer_widths = [max(nd._w for nd in layer) for layer in layers]
+            # 각 레이어의 총 높이 계산
+            layer_heights = []
+            for layer in layers:
+                total_h = sum(nd._h for nd in layer) + INTRA_LAYER_GAP * (len(layer) - 1)
+                layer_heights.append(total_h)
+
+            total_w = sum(layer_widths) + INTER_LAYER_GAP * (len(layers) - 1)
+            total_h = max(layer_heights)
+
+            # 전체 시작 좌표 (boundary 안쪽)
+            start_x = BND_MARGIN + 0.55
+            start_y_center = BND_MARGIN + 0.55 + total_h / 2
+
+            cur_x = start_x
+            for i, layer in enumerate(layers):
+                layer_total_h = sum(nd._h for nd in layer) + INTRA_LAYER_GAP * (len(layer) - 1)
+                cur_y = start_y_center + layer_total_h / 2
+                lw = layer_widths[i]
+                for nd in layer:
+                    # 레이어 내 중앙 정렬
+                    box_x = cur_x + (lw - nd._w) / 2
+                    box_y = cur_y - nd._h
+                    nd.box_ref = self.box(box_x, box_y, nd._w, nd._h, nd.text, nd.fs)
+                    cur_y -= (nd._h + INTRA_LAYER_GAP)
+                cur_x += lw + INTER_LAYER_GAP
+
+        else:  # TB: 위→아래
+            layer_heights = [max(nd._h for nd in layer) for layer in layers]
+            layer_widths = []
+            for layer in layers:
+                total_w = sum(nd._w for nd in layer) + INTRA_LAYER_GAP * (len(layer) - 1)
+                layer_widths.append(total_w)
+
+            total_h = sum(layer_heights) + INTER_LAYER_GAP * (len(layers) - 1)
+            total_w = max(layer_widths)
+
+            start_x_center = BND_MARGIN + 0.55 + total_w / 2
+            cur_y = BND_MARGIN + 0.55 + total_h
+
+            for i, layer in enumerate(layers):
+                layer_total_w = sum(nd._w for nd in layer) + INTRA_LAYER_GAP * (len(layer) - 1)
+                cur_x = start_x_center - layer_total_w / 2
+                lh = layer_heights[i]
+                for nd in layer:
+                    box_x = cur_x
+                    box_y = cur_y - lh + (lh - nd._h) / 2
+                    nd.box_ref = self.box(box_x, box_y, nd._w, nd._h, nd.text, nd.fs)
+                    cur_x += nd._w + INTRA_LAYER_GAP
+                cur_y -= (lh + INTER_LAYER_GAP)
+
+        # Step 4: boundary 자동 계산
+        all_boxes = [nd.box_ref for nd in self._nodes if nd.box_ref]
+        if all_boxes:
+            min_x = min(b.left for b in all_boxes) - BND_MARGIN
+            min_y = min(b.bot  for b in all_boxes) - BND_MARGIN
+            max_x = max(b.right for b in all_boxes) + BND_MARGIN
+            max_y = max(b.top   for b in all_boxes) + BND_MARGIN
+            # FIG label 공간 확보
+            min_y = min(min_y, 0.60)
+            self.boundary(min_x, min_y, max_x, max_y)
+
+        # Step 5: 엣지 → 화살표 자동 생성
+        for src, dst, lbl in self._edges:
+            if src.box_ref is None or dst.box_ref is None:
+                continue
+            sb, db = src.box_ref, dst.box_ref
+            if direction == 'LR':
+                # 같은 레이어거나 역방향이면 route로 우회
+                if sb.right < db.left - 0.01:
+                    if abs(sb.cy - db.cy) < 0.01:
+                        # 같은 높이 → 직선
+                        self.arrow_route([sb.right_mid(), db.left_mid()], label=lbl)
+                    else:
+                        # via_x: 각 shaft 최소 0.44" 확보
+                        # segment1: sb.right → via_x (수평)
+                        # segment2: via_x, sb.cy → via_x, db.cy (수직)
+                        # segment3: via_x → db.left (수평)
+                        # segment1 + segment3 = db.left - sb.right
+                        # 최소 shaft: segment1 ≥ 0.44, segment3 ≥ 0.44
+                        MIN_S = 0.44
+                        avail = db.left - sb.right
+                        if avail >= MIN_S * 2:
+                            via_x = sb.right + avail / 2
+                        else:
+                            # 공간 부족 → via_x를 sb.right + MIN_S, db.left를 강제 확장
+                            via_x = sb.right + MIN_S
+                        self.arrow_route([
+                            sb.right_mid(),
+                            (via_x, sb.cy),
+                            (via_x, db.cy),
+                            db.left_mid(),
+                        ], label=lbl)
+                else:
+                    # 역방향 or 같은 레이어: 아래 우회
+                    self.arrow_route([
+                        sb.bot_mid(),
+                        (sb.cx, sb.bot - 0.40),
+                        (db.cx, db.bot - 0.40),
+                        db.bot_mid(),
+                    ], label=lbl)
+            else:  # TB
+                if sb.bot > db.top + 0.01:
+                    self.arrow_v(sb, db, label=lbl)
+                else:
+                    self.arrow_route([
+                        sb.right_mid(),
+                        (sb.right + 0.40, sb.cy),
+                        (sb.right + 0.40, db.cy),
+                        db.right_mid(),
+                    ], label=lbl)
+
+        self.fig_label()
 
     # ── 요소 추가 ─────────────────────────────────────────────────────────────
 
@@ -181,8 +427,12 @@ class Drawing:
         try:
             renderer = self.fig.canvas.get_renderer()
             bb = t.get_window_extent(renderer=renderer)
-            tw = bb.width / self.dpi
-            th = bb.height / self.dpi
+            # axes.transData.inverted()로 pixel → data coordinate(inches) 변환
+            inv = self.ax.transData.inverted()
+            p0 = inv.transform((bb.x0, bb.y0))
+            p1 = inv.transform((bb.x1, bb.y1))
+            tw = abs(p1[0] - p0[0])
+            th = abs(p1[1] - p0[1])
         except Exception:
             # fallback: 글자 수 기반 근사값
             lines = text.split('\n')

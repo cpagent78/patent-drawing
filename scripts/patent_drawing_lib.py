@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v6.0
+patent_drawing_lib.py  v6.1
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -16,6 +16,12 @@ USPTO-Compliant Patent Drawing Library
         - arrow_bidir(): 직선 양방향 (단일 선 양쪽 화살촉)
         - arrow_bidir_route(): elbow 양방향
         - 양방향 elbow 규칙: 각 연결마다 전용 채널 x
+
+  v6.1  같은 레이어 박스 크기 통일:
+        - LR 방향: 같은 레이어 내 모든 박스 너비를 max 너비로 통일
+          → 같은 레이어의 right edge가 정렬되어 via_x가 모두 같은 지점으로 꺾임
+        - TB 방향: 같은 레이어 내 모든 박스 높이를 max 높이로 통일
+          → 같은 레이어의 bottom edge 정렬
 
   v6.0  Graph-first API 추가:
         - NodeDef: 텍스트만 정의하는 노드 클래스
@@ -247,6 +253,8 @@ class Drawing:
             nd._w = tw + (nd.pad_x if nd.pad_x else pad_x)
             nd._h = th + (nd.pad_y if nd.pad_y else pad_y)
 
+        # Step 1b: 레이어 내 박스 크기 통일 (크기 측정 후 레이어 계산 전에 적용 불가 → Step 2 후 처리)
+
         # Step 2: 레이어 계산 (Kahn's algorithm)
         from collections import defaultdict, deque
         in_degree = defaultdict(int)
@@ -277,6 +285,20 @@ class Drawing:
         orphans = [n for n in self._nodes if id(n) not in assigned]
         if orphans:
             layers.append(orphans)
+
+        # Step 2b: 레이어 내 박스 크기 통일
+        # LR: 같은 레이어의 너비를 max로 통일 → right edge 정렬, via_x 동일
+        # TB: 같은 레이어의 높이를 max로 통일 → bottom edge 정렬
+        if direction == 'LR':
+            for layer in layers:
+                max_w = max(nd._w for nd in layer)
+                for nd in layer:
+                    nd._w = max_w
+        else:
+            for layer in layers:
+                max_h = max(nd._h for nd in layer)
+                for nd in layer:
+                    nd._h = max_h
 
         # Step 3: 위치 계산
         # USPTO 표준 boundary: x1=0.55, y1=1.10, x2=7.90, y2=10.15

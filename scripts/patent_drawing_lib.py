@@ -279,33 +279,67 @@ class Drawing:
             layers.append(orphans)
 
         # Step 3: 위치 계산
-        BND_MARGIN = 0.55  # boundary 여백
-        INTER_LAYER_GAP = gap   # 레이어 간 gap
-        INTRA_LAYER_GAP = gap * 0.8  # 같은 레이어 내 수직 gap
+        # USPTO 표준 boundary: x1=0.55, y1=1.10, x2=7.90, y2=10.15
+        BND_X1, BND_Y1, BND_X2, BND_Y2 = 0.55, 1.10, 7.90, 10.15
+        INNER_PAD = 0.35  # boundary 안쪽 여백 (MIN_BND_PAD=0.30" 초과 확보)
+        CONTENT_W = BND_X2 - BND_X1 - INNER_PAD * 2  # 사용 가능 폭
+        CONTENT_H = BND_Y2 - BND_Y1 - INNER_PAD * 2  # 사용 가능 높이
+
+        INTER_LAYER_GAP = gap
+        INTRA_LAYER_GAP = gap * 0.7
 
         if direction == 'LR':
-            # 각 레이어의 최대 너비 계산
-            layer_widths = [max(nd._w for nd in layer) for layer in layers]
-            # 각 레이어의 총 높이 계산
+            layer_widths  = [max(nd._w for nd in layer) for layer in layers]
             layer_heights = []
             for layer in layers:
                 total_h = sum(nd._h for nd in layer) + INTRA_LAYER_GAP * (len(layer) - 1)
                 layer_heights.append(total_h)
 
-            total_w = sum(layer_widths) + INTER_LAYER_GAP * (len(layers) - 1)
-            total_h = max(layer_heights)
+            raw_w = sum(layer_widths) + INTER_LAYER_GAP * (len(layers) - 1)
+            raw_h = max(layer_heights)
 
-            # 전체 시작 좌표 (boundary 안쪽)
-            start_x = BND_MARGIN + 0.55
-            start_y_center = BND_MARGIN + 0.55 + total_h / 2
+            # 페이지 범위 초과 시 gap 자동 축소
+            total_box_w = sum(layer_widths)
+            n_gaps = max(len(layers) - 1, 1)
+            # elbow 화살표: via_x 양쪽 segment 각 0.44" 필요 → 최소 gap = 0.88"
+            MIN_INTER = 0.88
+            # 요청 gap 우선, 공간 부족 시 축소, 단 최소 MIN_INTER 보장
+            avail_for_gaps = CONTENT_W - total_box_w
+            if avail_for_gaps < MIN_INTER * n_gaps:
+                # 박스 패딩을 줄여서 공간 확보 (pad 최소 0.10")
+                excess = MIN_INTER * n_gaps - avail_for_gaps
+                pad_reduce = min(excess / len(self._nodes), pad_x - 0.10)
+                pad_x = max(0.10, pad_x - pad_reduce)
+                # 박스 크기 재계산
+                layer_widths = []
+                for layer in layers:
+                    for nd in layer:
+                        tw, th = self.measure_text(nd.text, nd.fs)
+                        nd._w = tw + pad_x
+                        nd._h = th + (pad_y or 0.14)
+                    layer_widths.append(max(nd._w for nd in layer))
+                total_box_w = sum(layer_widths)
+                avail_for_gaps = CONTENT_W - total_box_w
+            INTER_LAYER_GAP = max(MIN_INTER, min(gap, avail_for_gaps / n_gaps))
+            raw_w = total_box_w + INTER_LAYER_GAP * n_gaps
 
-            cur_x = start_x
+            if raw_h > CONTENT_H:
+                # 레이어 내 gap 축소
+                max_boxes_in_layer = max(len(layer) for layer in layers)
+                total_box_h = sum(max(nd._h for nd in layer) for layer in layers)
+                avail_gap_h = CONTENT_H - total_box_h / len(layers) * len(layers)
+                INTRA_LAYER_GAP = max(0.44, avail_gap_h / max(max_boxes_in_layer - 1, 1))
+
+            # 콘텐츠 영역 중앙 정렬
+            content_start_x = BND_X1 + INNER_PAD + (CONTENT_W - raw_w) / 2
+            content_cy = (BND_Y1 + BND_Y2) / 2  # 수직 중앙
+
+            cur_x = content_start_x
             for i, layer in enumerate(layers):
                 layer_total_h = sum(nd._h for nd in layer) + INTRA_LAYER_GAP * (len(layer) - 1)
-                cur_y = start_y_center + layer_total_h / 2
+                cur_y = content_cy + layer_total_h / 2
                 lw = layer_widths[i]
                 for nd in layer:
-                    # 레이어 내 중앙 정렬
                     box_x = cur_x + (lw - nd._w) / 2
                     box_y = cur_y - nd._h
                     nd.box_ref = self.box(box_x, box_y, nd._w, nd._h, nd.text, nd.fs)
@@ -314,20 +348,27 @@ class Drawing:
 
         else:  # TB: 위→아래
             layer_heights = [max(nd._h for nd in layer) for layer in layers]
-            layer_widths = []
+            layer_widths_list = []
             for layer in layers:
                 total_w = sum(nd._w for nd in layer) + INTRA_LAYER_GAP * (len(layer) - 1)
-                layer_widths.append(total_w)
+                layer_widths_list.append(total_w)
 
-            total_h = sum(layer_heights) + INTER_LAYER_GAP * (len(layers) - 1)
-            total_w = max(layer_widths)
+            raw_h = sum(layer_heights) + INTER_LAYER_GAP * (len(layers) - 1)
+            raw_w = max(layer_widths_list)
 
-            start_x_center = BND_MARGIN + 0.55 + total_w / 2
-            cur_y = BND_MARGIN + 0.55 + total_h
+            if raw_h > CONTENT_H:
+                total_box_h = sum(layer_heights)
+                avail_gap_h = CONTENT_H - total_box_h
+                INTER_LAYER_GAP = max(0.44, avail_gap_h / max(len(layers) - 1, 1))
+                raw_h = total_box_h + INTER_LAYER_GAP * (len(layers) - 1)
 
+            content_cx = (BND_X1 + BND_X2) / 2
+            content_start_y = (BND_Y1 + BND_Y2) / 2 + raw_h / 2
+
+            cur_y = content_start_y
             for i, layer in enumerate(layers):
                 layer_total_w = sum(nd._w for nd in layer) + INTRA_LAYER_GAP * (len(layer) - 1)
-                cur_x = start_x_center - layer_total_w / 2
+                cur_x = content_cx - layer_total_w / 2
                 lh = layer_heights[i]
                 for nd in layer:
                     box_x = cur_x
@@ -336,42 +377,40 @@ class Drawing:
                     cur_x += nd._w + INTRA_LAYER_GAP
                 cur_y -= (lh + INTER_LAYER_GAP)
 
-        # Step 4: boundary 자동 계산
-        all_boxes = [nd.box_ref for nd in self._nodes if nd.box_ref]
-        if all_boxes:
-            min_x = min(b.left for b in all_boxes) - BND_MARGIN
-            min_y = min(b.bot  for b in all_boxes) - BND_MARGIN
-            max_x = max(b.right for b in all_boxes) + BND_MARGIN
-            max_y = max(b.top   for b in all_boxes) + BND_MARGIN
-            # FIG label 공간 확보
-            min_y = min(min_y, 0.60)
-            self.boundary(min_x, min_y, max_x, max_y)
+        # Step 4: boundary 고정 (USPTO 표준)
+        self.boundary(BND_X1, BND_Y1, BND_X2, BND_Y2)
 
         # Step 5: 엣지 → 화살표 자동 생성
+        # LR 방향: 레이어별 경계 x 사전 계산 (via_x를 레이어 경계 중간으로 고정)
+        layer_boundary_xs = {}  # layer_idx → (max_right_of_layer, min_left_of_next_layer)
+        if direction == 'LR':
+            nd_to_layer = {}
+            for li, layer in enumerate(layers):
+                for nd in layer:
+                    nd_to_layer[id(nd)] = li
+            for li, layer in enumerate(layers):
+                if li + 1 < len(layers):
+                    max_right = max(nd.box_ref.right for nd in layer if nd.box_ref)
+                    min_left  = min(nd.box_ref.left for nd in layers[li+1] if nd.box_ref)
+                    layer_boundary_xs[li] = (max_right + min_left) / 2  # 레이어 간 중간 x
+
         for src, dst, lbl in self._edges:
             if src.box_ref is None or dst.box_ref is None:
                 continue
             sb, db = src.box_ref, dst.box_ref
             if direction == 'LR':
-                # 같은 레이어거나 역방향이면 route로 우회
                 if sb.right < db.left - 0.01:
-                    if abs(sb.cy - db.cy) < 0.01:
+                    if abs(sb.cy - db.cy) < 0.02:
                         # 같은 높이 → 직선
                         self.arrow_route([sb.right_mid(), db.left_mid()], label=lbl)
                     else:
-                        # via_x: 각 shaft 최소 0.44" 확보
-                        # segment1: sb.right → via_x (수평)
-                        # segment2: via_x, sb.cy → via_x, db.cy (수직)
-                        # segment3: via_x → db.left (수평)
-                        # segment1 + segment3 = db.left - sb.right
-                        # 최소 shaft: segment1 ≥ 0.44, segment3 ≥ 0.44
+                        # via_x: sb.right + 0.44" (첫 segment 보장)
+                        # via_x → db.left 도 0.44" 이상이어야 함
                         MIN_S = 0.44
-                        avail = db.left - sb.right
-                        if avail >= MIN_S * 2:
-                            via_x = sb.right + avail / 2
-                        else:
-                            # 공간 부족 → via_x를 sb.right + MIN_S, db.left를 강제 확장
-                            via_x = sb.right + MIN_S
+                        via_x = sb.right + MIN_S
+                        if db.left - via_x < MIN_S:
+                            # 공간 부족: 중간점 사용 (검증 경고는 발생하지만 최선)
+                            via_x = (sb.right + db.left) / 2
                         self.arrow_route([
                             sb.right_mid(),
                             (via_x, sb.cy),
@@ -379,7 +418,7 @@ class Drawing:
                             db.left_mid(),
                         ], label=lbl)
                 else:
-                    # 역방향 or 같은 레이어: 아래 우회
+                    # 역방향: 아래 우회
                     self.arrow_route([
                         sb.bot_mid(),
                         (sb.cx, sb.bot - 0.40),

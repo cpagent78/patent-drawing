@@ -724,11 +724,14 @@ class Drawing:
         internal_start_x = content_cx - max_row_w / 2 + ext_left_w / 2 - ext_right_w / 2
 
         # Step 3: 박스 배치
-        # 내부 배치를 ext 공간만큼 왼쪽으로 offset
+        # 내부 영역 사용 가능 범위: page boundary + 점선여백 확보
+        INT_BND_MARGIN = 0.20  # 점선↔page boundary 여백
+        int_area_left  = BND_X1 + INT_BND_MARGIN + BND_PAD  # 점선 안쪽 시작
+        int_area_right = BND_X2 - INNER_PAD - ext_right_w   # ext 공간 차감
+        internal_cx = (int_area_left + int_area_right) / 2
+
         for ri, row in enumerate(rows):
             row_w = sum(nd._w for nd in row) + BOX_GAP_H * (len(row) - 1)
-            # 내부 영역 중심: 페이지 중심에서 ext 공간만큼 왼쪽으로
-            internal_cx = content_cx - ext_right_w / 2 + ext_left_w / 2
             start_x = internal_cx - row_w / 2
             cur_x = start_x
             cy = row_ys[ri]

@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v6.1
+patent_drawing_lib.py  v6.2
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -362,21 +362,36 @@ class Drawing:
                 avail_gap_h = CONTENT_H - total_box_h / len(layers) * len(layers)
                 INTRA_LAYER_GAP = max(0.44, avail_gap_h / max(max_boxes_in_layer - 1, 1))
 
-            # 콘텐츠 영역 중앙 정렬
-            content_start_x = BND_X1 + INNER_PAD + (CONTENT_W - raw_w) / 2
+            # 콘텐츠 영역 center-to-center 등간격 배치
             content_cy = (BND_Y1 + BND_Y2) / 2  # 수직 중앙
 
-            cur_x = content_start_x
+            # 레이어 center x 좌표를 등간격으로 계산
+            # 좌우 끝 레이어의 center가 boundary 안에 들어오도록 배치
+            n_layers = len(layers)
+            half_w_first = layer_widths[0] / 2
+            half_w_last  = layer_widths[-1] / 2
+
+            # 사용 가능 범위: first_cx ~ last_cx
+            first_cx_min = BND_X1 + INNER_PAD + half_w_first
+            last_cx_max  = BND_X2 - INNER_PAD - half_w_last
+            avail_span = last_cx_max - first_cx_min
+
+            if n_layers > 1:
+                cx_gap = avail_span / (n_layers - 1)
+            else:
+                cx_gap = 0
+
+            layer_cxs = [first_cx_min + i * cx_gap for i in range(n_layers)]
+
             for i, layer in enumerate(layers):
                 layer_total_h = sum(nd._h for nd in layer) + INTRA_LAYER_GAP * (len(layer) - 1)
                 cur_y = content_cy + layer_total_h / 2
-                lw = layer_widths[i]
+                lcx = layer_cxs[i]
                 for nd in layer:
-                    box_x = cur_x + (lw - nd._w) / 2
+                    box_x = lcx - nd._w / 2
                     box_y = cur_y - nd._h
                     nd.box_ref = self.box(box_x, box_y, nd._w, nd._h, nd.text, nd.fs)
                     cur_y -= (nd._h + INTRA_LAYER_GAP)
-                cur_x += lw + INTER_LAYER_GAP
 
         else:  # TB: 위→아래
             layer_heights = [max(nd._h for nd in layer) for layer in layers]

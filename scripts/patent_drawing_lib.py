@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v5.1
+patent_drawing_lib.py  v5.2
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -17,6 +17,11 @@ USPTO-Compliant Patent Drawing Library
         - arrow_bidir_route(): elbow 양방향
         - 양방향 elbow 규칙: 각 연결마다 전용 채널 x
 
+  v5.2  코드 자동화 강화 (LLM 실수 방지):
+        - validate: dead-end 박스 감지 (입력↑ 출력=0인 중간 박스)
+        - validate: 화살표 경로가 박스 텍스트 중심 관통 감지
+
+  v5.1  (이전)
   v5.0  FIG.3 원형 다이어그램 실전 반영:
         - BoxRef.edge_toward(other_cx, other_cy): 박스 경계 교차점 계산
           (원형/타원 배치에서 대각선 화살표 정확한 출발/도착점)
@@ -653,5 +658,87 @@ class Drawing:
                         issues.append(
                             f'Labeled arrow "{lbl}" segment too short ({seg_len:.2f}"). '
                             f'Need {MIN_LABELED}" for label visibility.')
+
+        # 9. Dead-end 박스 감지
+        # 들어오는 화살표가 하나 이상 있고 나가는 화살표가 없는 중간 박스는 dead-end
+        all_routes = [cmd[1] for cmd in self._cmds if cmd[0] in ('route', 'bidir')]
+        box_has_outgoing = {id(b): False for b in self._box_refs}
+        box_has_incoming = {id(b): False for b in self._box_refs}
+
+        for pts in all_routes:
+            if len(pts) < 2:
+                continue
+            src_pt = pts[0]
+            dst_pt = pts[-1]
+            for b in self._box_refs:
+                # tail(src)에 가까운 박스 = 출발 박스
+                if (abs(src_pt[0] - b.cx) < b.w / 2 + EDGE_TOL and
+                        abs(src_pt[1] - b.cy) < b.h / 2 + EDGE_TOL):
+                    box_has_outgoing[id(b)] = True
+                # head(dst)에 가까운 박스 = 도착 박스
+                if (abs(dst_pt[0] - b.cx) < b.w / 2 + EDGE_TOL and
+                        abs(dst_pt[1] - b.cy) < b.h / 2 + EDGE_TOL):
+                    box_has_incoming[id(b)] = True
+
+        for b in self._box_refs:
+            # 입력은 있는데 출력이 없고, 전체 박스가 2개 이상인 경우만 체크
+            if (box_has_incoming[id(b)] and not box_has_outgoing[id(b)]
+                    and len(self._box_refs) > 1):
+                # bidir 화살표는 양방향이므로 outgoing으로도 간주 — 이미 위에서 처리됨
+                # 마지막 노드(terminal)는 dead-end가 아닐 수 있음
+                # 단, 모든 박스 중 outgoing이 있는 게 하나라도 있으면 terminal 아님
+                has_any_downstream = any(box_has_outgoing[id(ob)] for ob in self._box_refs)
+                if has_any_downstream:
+                    # 이 박스에서만 outgoing 없음 → dead-end 경고
+                    for cmd in self._cmds:
+                        if cmd[0] == 'box' and cmd[1] is b:
+                            short = cmd[2][:30].replace('\n', ' ')
+                            issues.append(
+                                f'Dead-end box "{short}": has incoming arrows but no outgoing. '
+                                f'Add output arrow or verify it is an intentional terminal node.')
+                            break
+
+        # 10. 화살표 경로가 박스 텍스트 중심 관통 감지
+        # 화살표 선분이 어떤 박스의 내부 영역(텍스트 중심 근처)을 지나는지 확인
+        TEXT_ZONE_PAD = 0.10  # 박스 중심 텍스트 영역 여백
+        for cmd in self._cmds:
+            if cmd[0] in ('route', 'bidir'):
+                pts = cmd[1]
+                for i in range(len(pts) - 1):
+                    ax0, ay0 = pts[i]
+                    ax1, ay1 = pts[i + 1]
+                    seg_dx = ax1 - ax0
+                    seg_dy = ay1 - ay0
+                    seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy
+                    for b in self._box_refs:
+                        # 이 선분이 출발/도착 박스면 스킵 (연결 지점)
+                        is_endpoint = (
+                            (abs(pts[0][0] - b.cx) < b.w / 2 + EDGE_TOL and
+                             abs(pts[0][1] - b.cy) < b.h / 2 + EDGE_TOL) or
+                            (abs(pts[-1][0] - b.cx) < b.w / 2 + EDGE_TOL and
+                             abs(pts[-1][1] - b.cy) < b.h / 2 + EDGE_TOL)
+                        )
+                        if is_endpoint:
+                            continue
+                        # 선분에서 박스 중심까지 최단거리 계산
+                        if seg_len_sq < 1e-8:
+                            continue
+                        t = max(0.0, min(1.0, (
+                            (b.cx - ax0) * seg_dx + (b.cy - ay0) * seg_dy
+                        ) / seg_len_sq))
+                        closest_x = ax0 + t * seg_dx
+                        closest_y = ay0 + t * seg_dy
+                        if (b.left + TEXT_ZONE_PAD < closest_x < b.right - TEXT_ZONE_PAD and
+                                b.bot + TEXT_ZONE_PAD < closest_y < b.top - TEXT_ZONE_PAD):
+                            short = cmd[2][:20] if len(cmd) > 2 else '?'
+                            box_text = ''
+                            for bc in self._cmds:
+                                if bc[0] == 'box' and bc[1] is b:
+                                    box_text = bc[2][:25].replace('\n', ' ')
+                                    break
+                            issues.append(
+                                f'Arrow passes through box "{box_text}": '
+                                f'segment ({ax0:.2f},{ay0:.2f})→({ax1:.2f},{ay1:.2f}) '
+                                f'crosses box text area. Reroute the arrow.')
 
         return issues

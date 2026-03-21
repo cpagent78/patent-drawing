@@ -1,0 +1,657 @@
+"""
+patent_drawing_lib.py  v5.1
+USPTO-Compliant Patent Drawing Library
+
+변경 이력:
+  v3.0  라벨 겹침 원천 차단: 화살표 라벨을 선분 중간이 아닌
+        박스-free 구간에 자동 배치. 박스 텍스트 w+h 동시 축소.
+        zorder 체계 정비. 검증 강화.
+
+  v4.0  FIG.1 실전 반영:
+        - layer(): 레이어 점선 박스 + 참조번호
+        - split_from_box(): T-junction 없는 1→N 분기
+        - validate: T-junction 감지, 화살표 too-short 검증
+
+  v4.1  FIG.2 실전 반영:
+        - arrow_bidir(): 직선 양방향 (단일 선 양쪽 화살촉)
+        - arrow_bidir_route(): elbow 양방향
+        - 양방향 elbow 규칙: 각 연결마다 전용 채널 x
+
+  v5.0  FIG.3 원형 다이어그램 실전 반영:
+        - BoxRef.edge_toward(other_cx, other_cy): 박스 경계 교차점 계산
+          (원형/타원 배치에서 대각선 화살표 정확한 출발/도착점)
+        - arrow_diagonal(box_a, box_b): 두 박스 사이 직선 대각선 화살표
+          rect_edge 기반으로 경계 정확 처리
+        - _resolve_steps(): 중복점(0.00" 세그먼트) 자동 제거
+        - validate 강화:
+          · 박스 텍스트 파이프 문자(|) 감지 → 줄바꿈 사용 권고
+          · bidir 경로도 T-junction 체크에 포함
+          · arrow_bidir 경로도 too-short 검증
+
+  설계 원칙 (실전에서 확립):
+  1. 박스 텍스트: "102\\nCPU" 형식 — 파이프(|) 금지
+  2. 화살표: 박스→박스, T-junction 금지
+  3. 양방향: arrow_bidir() 또는 arrow_bidir_route() 사용
+  4. 원형 배치: arrow_diagonal() 사용
+  5. 중앙 설명 텍스트: label() — 참조번호 없는 다이어그램 명칭
+  6. 검토: 한 도면씩, 검증 통과 + 시각 확인 후 다음으로
+"""
+
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.patches import FancyBboxPatch
+import os, math
+
+# ── USPTO 상수 ────────────────────────────────────────────────────────────────
+FS_BODY  = 10
+FS_FIG   = 13
+FW       = 'normal'
+BOX_FILL = 'white'
+BOX_EDGE = 'black'
+LW_BOX   = 1.5
+LW_ARR   = 1.3
+LW_FRAME = 1.0
+PAD      = 0.01
+LABEL_BG = dict(facecolor='white', edgecolor='none', pad=2)
+
+PAGE_W, PAGE_H = 8.5, 11.0
+
+Z_BOUNDARY  = 1
+Z_BND_LABEL = 2
+Z_ARROW     = 4
+Z_ARROWHEAD = 13   # 화살촉은 박스 fill/border/text 위에 — 도착점에서 가려지지 않도록
+Z_BOX_FILL  = 10
+Z_BOX_EDGE  = 11
+Z_BOX_TEXT  = 12
+Z_ARR_LABEL = 20
+Z_SEC_LABEL = 21
+Z_FIG_LABEL = 22
+
+
+# ── BoxRef ────────────────────────────────────────────────────────────────────
+class BoxRef:
+    def __init__(self, x, y, w, h):
+        self.x, self.y, self.w, self.h = x, y, w, h
+
+    @property
+    def cx(self): return self.x + self.w / 2
+    @property
+    def cy(self): return self.y + self.h / 2
+    @property
+    def top(self): return self.y + self.h
+    @property
+    def bot(self): return self.y
+    @property
+    def left(self): return self.x
+    @property
+    def right(self): return self.x + self.w
+
+    def top_mid(self):   return (self.cx, self.top)
+    def bot_mid(self):   return (self.cx, self.bot)
+    def left_mid(self):  return (self.left, self.cy)
+    def right_mid(self): return (self.right, self.cy)
+    def side(self, which): return getattr(self, f"{which}_mid")()
+
+    def edge_toward(self, tx, ty, gap=0.08):
+        """
+        이 박스 중심에서 (tx, ty) 방향으로 나가는 경계 교차점.
+        gap: 경계에서 추가로 나올 거리 (화살표 시작/끝 여백).
+        원형 배치 대각선 화살표에서 사용.
+        """
+        dx = tx - self.cx
+        dy = ty - self.cy
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist < 1e-9:
+            return (self.cx, self.cy)
+        ux, uy = dx/dist, dy/dist
+        t = min((self.w/2) / max(abs(ux), 1e-9),
+                (self.h/2) / max(abs(uy), 1e-9))
+        return (self.cx + ux*(t + gap), self.cy + uy*(t + gap))
+
+    def contains(self, x, y, margin=0.05):
+        return (self.x - margin < x < self.right + margin and
+                self.y - margin < y < self.top + margin)
+
+
+# ── Drawing ───────────────────────────────────────────────────────────────────
+class Drawing:
+
+    MIN_BND_PAD = 0.30
+
+    def __init__(self, filename, fig_num="1", dpi=150):
+        self.filename  = filename
+        self.fig_num   = fig_num
+        self.dpi       = dpi
+        self._cmds     = []
+        self._box_refs = []
+
+        self.fig, self.ax = plt.subplots(figsize=(PAGE_W, PAGE_H))
+        self.ax.set_xlim(0, PAGE_W)
+        self.ax.set_ylim(0, PAGE_H)
+        self.ax.axis('off')
+        self.fig.patch.set_facecolor('white')
+        self.ax.set_facecolor('white')
+
+    # ── 요소 추가 ─────────────────────────────────────────────────────────────
+
+    def boundary(self, x1, y1, x2, y2, label="", is_page_boundary=True):
+        """페이지 경계 (점선 직사각형). is_page_boundary=True이면 마진 검증 대상."""
+        self._cmds.append(('boundary', x1, y1, x2, y2, label, is_page_boundary))
+
+    def layer(self, x1, y1, x2, y2, label=""):
+        """
+        내부 레이어 경계 (점선 박스 + 참조번호).
+        boundary(is_page_boundary=False) 단축 메서드.
+        사용: d.layer(0.55, 7.40, 7.95, 10.10, "EDGE LAYER  110")
+        """
+        self._cmds.append(('boundary', x1, y1, x2, y2, label, False))
+
+    def box(self, x, y, w, h, text, fs=None) -> BoxRef:
+        """
+        박스 추가. 텍스트 폰트 자동 축소.
+        text 형식: "102\\nCPU" (파이프 문자 금지)
+        """
+        b = BoxRef(x, y, w, h)
+        self._box_refs.append(b)
+        self._cmds.append(('box', b, text, fs))
+        return b
+
+    def fig_label(self, y=None):
+        """FIG. N 라벨 (하단 중앙 자동 배치)."""
+        self._cmds.append(('fig_label', y))
+
+    def label(self, x, y, text, ha='center', fs=None):
+        """
+        독립 텍스트 라벨 (참조번호 없는 설명용).
+        원형 다이어그램 중앙 명칭, 섹션 구분 등에 사용.
+        박스가 아니므로 참조번호 불필요.
+        """
+        self._cmds.append(('label', x, y, text, ha, fs or FS_BODY))
+
+    def line(self, x1, y1, x2, y2, ls='-'):
+        """화살촉 없는 단순 선분. 브래킷, 구분선, 버스 등에 사용."""
+        self._cmds.append(('line', x1, y1, x2, y2, ls))
+
+    # ── 화살표 ────────────────────────────────────────────────────────────────
+
+    def arrow_v(self, src_box: BoxRef, dst_box: BoxRef, label=""):
+        """수직 단방향 화살표 (src 하단 → dst 상단)."""
+        self._cmds.append(('route', [src_box.bot_mid(), dst_box.top_mid()],
+                           label, None, None))
+
+    def arrow_h(self, src_box: BoxRef, dst_box: BoxRef, label=""):
+        """수평 단방향 화살표 (src 우측 → dst 좌측)."""
+        self._cmds.append(('route', [src_box.right_mid(), dst_box.left_mid()],
+                           label, None, None))
+
+    def arrow_bidir(self, box_a: BoxRef, box_b: BoxRef, side='h'):
+        """
+        양방향 단일 선 (↔ 또는 ↕).
+        side='h': 수평, side='v': 수직.
+        두 화살표 겹침 대신 사용 — 명확성 규칙 준수.
+        """
+        if side == 'h':
+            pts = [box_a.right_mid(), box_b.left_mid()]
+        else:
+            pts = [box_a.bot_mid(), box_b.top_mid()]
+        self._cmds.append(('bidir', pts))
+
+    def arrow_bidir_route(self, steps):
+        """
+        양방향 elbow 화살표 (단일 선, 양 끝 화살촉).
+        steps: arrow_route()와 동일 형식.
+        각 연결마다 전용 채널 x 사용 (이웃 연결과 공유 금지).
+        사용: d.arrow_bidir_route([mem.right_mid(), (CH_MEM, mem.cy), (CH_MEM, cpu.cy+0.20), (cpu.left, cpu.cy+0.20)])
+        """
+        pts = self._resolve_steps(steps)
+        self._cmds.append(('bidir', pts))
+
+    def arrow_diagonal(self, box_a: BoxRef, box_b: BoxRef, gap=0.08):
+        """
+        두 박스 사이 직선 대각선 화살표.
+        각 박스의 경계 교차점에서 출발/도착 (정확한 rect_edge 계산).
+        원형/타원 배치 다이어그램에서 사용.
+        사용: d.arrow_diagonal(boxes[i], boxes[j])
+        """
+        sx, sy = box_a.edge_toward(box_b.cx, box_b.cy, gap)
+        ex, ey = box_b.edge_toward(box_a.cx, box_a.cy, gap)
+        self._cmds.append(('route', [(sx, sy), (ex, ey)], '', None, None))
+
+    def arrow_route(self, steps, label="", label_pos=1,
+                    label_dx=0.18, label_ha='left', ls='-'):
+        """
+        꺾인 단방향 화살표.
+        steps: (x,y) 절대좌표 또는 ('right_to',x) 등 명령어.
+        중복점은 자동 제거됨.
+        """
+        pts = self._resolve_steps(steps)
+        self._cmds.append(('route', pts, label, label_pos,
+                            (label_dx, label_ha), ls))
+
+    def split_from_box(self, src_box: BoxRef, destinations, via_y=None):
+        """
+        1→N 팬아웃 (T-junction 없음).
+        src_box 하단을 n등분한 위치에서 각 dst로 독립 화살표.
+        사용: d.split_from_box(eng, [out1, out2, out3], via_y=4.5)
+        """
+        dsts = [(item, "") if not isinstance(item, tuple) else item
+                for item in destinations]
+        n = len(dsts)
+        if n == 0:
+            return
+
+        step = src_box.w / (n + 1)
+        start_xs = [src_box.left + step * (i + 1) for i in range(n)]
+
+        if via_y is None:
+            max_top = max(d.top for d, _ in dsts)
+            via_y = max_top + 0.20
+
+        for i, ((dst, lbl), sx) in enumerate(zip(dsts, start_xs)):
+            if abs(sx - dst.cx) < 0.01 or abs(via_y - dst.top) < 0.01:
+                pts = [(sx, src_box.bot), dst.top_mid()]
+            else:
+                pts = [(sx, src_box.bot), (sx, via_y), (dst.cx, via_y), dst.top_mid()]
+            self._cmds.append(('route', pts, lbl,
+                                1 if lbl else None, (0.12, 'left'), '-'))
+
+    # ── 렌더링 ────────────────────────────────────────────────────────────────
+
+    def save(self):
+        ax = self.ax
+        bnd_rect = None
+
+        # Pass 1: boundary / layer
+        for cmd in self._cmds:
+            if cmd[0] == 'boundary':
+                _, x1, y1, x2, y2, lbl, is_page = cmd
+                ax.add_patch(FancyBboxPatch(
+                    (x1, y1), x2-x1, y2-y1,
+                    boxstyle="square,pad=0",
+                    facecolor='none', edgecolor=BOX_EDGE,
+                    linewidth=LW_FRAME, linestyle='--', zorder=Z_BOUNDARY))
+                if lbl:
+                    ax.text(x1+0.12, y2-0.12, lbl,
+                            ha='left', va='top',
+                            fontsize=FS_BODY, fontweight=FW, zorder=Z_BND_LABEL)
+                if is_page:
+                    bnd_rect = (x1, y1, x2, y2)
+
+        # Pass 2: 화살표 + 단순 선 (박스 fill 아래)
+        for cmd in self._cmds:
+            if cmd[0] == 'route':
+                _, pts, lbl, lpos, lopt, *rest = cmd
+                ls = rest[0] if rest else '-'
+                ldx, lha = lopt if lopt else (0.18, 'left')
+                self._render_route(ax, pts, lbl, lpos, ldx, lha, ls)
+            elif cmd[0] == 'bidir':
+                self._render_bidir(ax, cmd[1])
+            elif cmd[0] == 'line':
+                _, x1, y1, x2, y2, ls = cmd
+                ax.plot([x1, x2], [y1, y2],
+                        color=BOX_EDGE, lw=LW_ARR, linestyle=ls,
+                        solid_capstyle='round', zorder=Z_ARROW)
+
+        # Pass 3: 박스 white fill
+        for cmd in self._cmds:
+            if cmd[0] == 'box':
+                _, b, _, _ = cmd
+                ax.add_patch(FancyBboxPatch(
+                    (b.x, b.y), b.w, b.h, boxstyle="square,pad=0",
+                    facecolor=BOX_FILL, edgecolor='none',
+                    linewidth=0, zorder=Z_BOX_FILL))
+
+        # Pass 4: 박스 border + text
+        for cmd in self._cmds:
+            if cmd[0] == 'box':
+                _, b, text, fs_override = cmd
+                ax.add_patch(FancyBboxPatch(
+                    (b.x, b.y), b.w, b.h, boxstyle="square,pad=0",
+                    facecolor='none', edgecolor=BOX_EDGE,
+                    linewidth=LW_BOX, zorder=Z_BOX_EDGE))
+                fs = self._fit_font(text, b.w-0.18, b.h-0.10,
+                                    fs_override or FS_BODY)
+                ax.text(b.cx, b.cy, text,
+                        ha='center', va='center',
+                        fontsize=fs, fontweight=FW,
+                        multialignment='center', wrap=False,
+                        zorder=Z_BOX_TEXT)
+
+        # Pass 5: 독립 라벨
+        for cmd in self._cmds:
+            if cmd[0] == 'label':
+                _, x, y, text, ha, fs = cmd
+                ax.text(x, y, text, ha=ha, va='center',
+                        fontsize=fs, fontweight=FW,
+                        bbox=LABEL_BG, zorder=Z_SEC_LABEL)
+
+        # Pass 6: FIG. 라벨
+        for cmd in self._cmds:
+            if cmd[0] == 'fig_label':
+                fig_y = cmd[1] if (len(cmd) > 1 and cmd[1] is not None) else None
+                if fig_y is None:
+                    for c in self._cmds:
+                        if c[0] == 'boundary' and c[6]:  # is_page_boundary
+                            fig_y = c[2] - 0.28
+                            break
+                    if fig_y is None:
+                        fig_y = 0.50
+                ax.text(PAGE_W/2, fig_y, f'FIG. {self.fig_num}',
+                        ha='center', va='center',
+                        fontsize=FS_FIG, fontweight=FW, zorder=Z_FIG_LABEL)
+
+        os.makedirs(os.path.dirname(os.path.abspath(self.filename)), exist_ok=True)
+        self.fig.savefig(self.filename, dpi=self.dpi,
+                         facecolor='white', bbox_inches='tight')
+
+        issues = self._validate(bnd_rect)
+        if issues:
+            print(f"⚠  {self.filename}")
+            for iss in issues:
+                print(f"   · {iss}")
+        else:
+            print(f"✓  {self.filename}")
+
+        plt.close(self.fig)
+
+    # ── 내부 렌더 ─────────────────────────────────────────────────────────────
+
+    def _render_bidir(self, ax, pts):
+        """양방향 화살촉 (직선 또는 elbow)."""
+        if len(pts) == 2:
+            ax.annotate('', xy=pts[1], xytext=pts[0],
+                        arrowprops=dict(arrowstyle='<->', color=BOX_EDGE,
+                                       lw=LW_ARR, mutation_scale=12),
+                        zorder=Z_ARROWHEAD)
+        else:
+            for i in range(len(pts)-1):
+                ax.plot([pts[i][0], pts[i+1][0]],
+                        [pts[i][1], pts[i+1][1]],
+                        color=BOX_EDGE, lw=LW_ARR,
+                        solid_capstyle='butt', zorder=Z_ARROW)
+            ax.annotate('', xy=pts[0], xytext=pts[1],
+                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                                       lw=LW_ARR, mutation_scale=12),
+                        zorder=Z_ARROWHEAD)
+            ax.annotate('', xy=pts[-1], xytext=pts[-2],
+                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                                       lw=LW_ARR, mutation_scale=12),
+                        zorder=Z_ARROWHEAD)
+
+    def _render_route(self, ax, pts, lbl, lpos, ldx, lha, ls='-'):
+        n = len(pts)
+        if n < 2:
+            return
+        for i in range(n-2):
+            ax.plot([pts[i][0], pts[i+1][0]],
+                    [pts[i][1], pts[i+1][1]],
+                    color=BOX_EDGE, lw=LW_ARR, linestyle=ls,
+                    solid_capstyle='butt', zorder=Z_ARROW)
+        ax.annotate('', xy=pts[-1], xytext=pts[-2],
+                    arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                                   lw=LW_ARR, linestyle=ls, mutation_scale=12),
+                    zorder=Z_ARROWHEAD)
+        if lbl:
+            idx = self._best_label_segment(pts, lpos)
+            if idx is not None:
+                mx = (pts[idx][0] + pts[idx+1][0]) / 2
+                my = (pts[idx][1] + pts[idx+1][1]) / 2
+                if abs(pts[idx][0] - pts[idx+1][0]) < 0.01:
+                    ax.text(mx + (ldx or 0.18), my, lbl,
+                            ha=lha or 'left', va='center',
+                            fontsize=FS_BODY, fontweight=FW,
+                            bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+                else:
+                    ax.text(mx, my+0.18, lbl,
+                            ha='center', va='bottom',
+                            fontsize=FS_BODY, fontweight=FW,
+                            bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+
+    def _best_label_segment(self, pts, preferred_pos):
+        n = len(pts)
+        if n < 2:
+            return None
+
+        def clear(i):
+            mx = (pts[i][0]+pts[i+1][0])/2
+            my = (pts[i][1]+pts[i+1][1])/2
+            return not any(b.contains(mx, my, 0.12) for b in self._box_refs)
+
+        def seg_len(i):
+            return math.sqrt((pts[i+1][0]-pts[i][0])**2 + (pts[i+1][1]-pts[i][1])**2)
+
+        if preferred_pos is not None:
+            p = max(0, min(preferred_pos, n-2))
+            if clear(p):
+                return p
+        candidates = [(seg_len(i), i) for i in range(n-1) if clear(i)]
+        return max(candidates)[1] if candidates else None
+
+    def _resolve_steps(self, steps):
+        """steps → 절대 좌표 목록. 중복점(0.00" 세그먼트) 자동 제거."""
+        pts = []
+        cx, cy = 0.0, 0.0
+        for s in steps:
+            if isinstance(s, tuple) and len(s) == 2:
+                if isinstance(s[0], (int, float)):
+                    cx, cy = float(s[0]), float(s[1])
+                    pts.append((cx, cy))
+                elif isinstance(s[0], str):
+                    cmd, val = s
+                    if   cmd == 'right_to': cx = val
+                    elif cmd == 'left_to':  cx = val
+                    elif cmd == 'up_to':    cy = val
+                    elif cmd == 'down_to':  cy = val
+                    elif cmd == 'right':    cx += val
+                    elif cmd == 'left':     cx -= val
+                    elif cmd == 'up':       cy += val
+                    elif cmd == 'down':     cy -= val
+                    pts.append((cx, cy))
+            else:
+                raise ValueError(f"Invalid step: {s}")
+
+        # 중복점 제거 (연속된 동일 좌표)
+        deduped = [pts[0]] if pts else []
+        for p in pts[1:]:
+            if abs(p[0]-deduped[-1][0]) > 1e-4 or abs(p[1]-deduped[-1][1]) > 1e-4:
+                deduped.append(p)
+        return deduped
+
+    def _fit_font(self, text, box_w_in, box_h_in, fs_start):
+        """박스 크기에 맞게 폰트 자동 축소. 최소 8pt."""
+        box_w_px = box_w_in * self.fig.dpi
+        box_h_px = box_h_in * self.fig.dpi
+        fs = float(fs_start)
+        for _ in range(25):
+            t = self.ax.text(0, 0, text, fontsize=fs, fontweight=FW,
+                             multialignment='center',
+                             transform=self.ax.transData, visible=False)
+            self.fig.canvas.draw()
+            try:
+                bb = t.get_window_extent(renderer=self.fig.canvas.get_renderer())
+                tw, th = bb.width, bb.height
+            except Exception:
+                tw, th = 0, 0
+            t.remove()
+            if tw <= box_w_px*0.88 and th <= box_h_px*0.85:
+                break
+            fs = max(8.0, fs*0.88)
+        return fs
+
+    # ── 검증 ──────────────────────────────────────────────────────────────────
+
+    def _validate(self, bnd_rect):
+        issues = []
+
+        # 1. 박스 마진 검증
+        if bnd_rect:
+            bx1, by1, bx2, by2 = bnd_rect
+            PAD = self.MIN_BND_PAD
+            for cmd in self._cmds:
+                if cmd[0] == 'box':
+                    _, b, text, _ = cmd
+                    short = text[:30].replace('\n', ' ')
+                    if b.left - bx1 < PAD and b.left >= bx1 - 0.05:
+                        issues.append(f'Box "{short}": left margin {b.left-bx1:.2f}" < {PAD}" min')
+                    if bx2 - b.right < PAD and b.right <= bx2 + 0.05:
+                        issues.append(f'Box "{short}": right margin {bx2-b.right:.2f}" < {PAD}" min')
+                    if b.bot - by1 < PAD and b.bot >= by1 - 0.05:
+                        issues.append(f'Box "{short}": bottom margin {b.bot-by1:.2f}" < {PAD}" min')
+                    if by2 - b.top < PAD and b.top <= by2 + 0.05:
+                        issues.append(f'Box "{short}": top margin {by2-b.top:.2f}" < {PAD}" min')
+
+        # 2. 파이프 문자 감지 (비표준 — 줄바꿈 사용 권고)
+        for cmd in self._cmds:
+            if cmd[0] == 'box':
+                _, b, text, _ = cmd
+                if '|' in text:
+                    short = text[:30].replace('\n', ' ')
+                    issues.append(f'Box "{short}": pipe character "|" found. Use "\\n" instead.')
+
+        # 5. 레이어 라벨 겹침 검사
+        # boundary 라벨은 좌상단(x1+0.12, y2-0.12)에 위치 — 높이 약 0.30"
+        # 박스 상단이 레이어 boundary y2 - 0.32" 이상이면 라벨과 겹침
+        LBL_RESERVE = 0.32
+        for cmd in self._cmds:
+            if cmd[0] == 'boundary':
+                _, bx1, by1, bx2, by2, lbl, is_page = cmd
+                if not is_page and lbl:   # 레이어(layer) 경계만 체크
+                    for bcmd in self._cmds:
+                        if bcmd[0] == 'box':
+                            _, b, text, _ = bcmd
+                            short = text[:25].replace('\n', ' ')
+                            # 박스가 이 레이어 안에 있는지 먼저 확인
+                            in_layer = (b.left >= bx1 - 0.05 and
+                                        b.right <= bx2 + 0.05 and
+                                        b.bot >= by1 - 0.05 and
+                                        b.top <= by2 + 0.05)
+                            if in_layer and b.top > by2 - LBL_RESERVE:
+                                issues.append(
+                                    f'Box "{short}" top ({b.top:.2f}) overlaps '
+                                    f'layer label area (layer top={by2:.2f}, '
+                                    f'reserve={LBL_RESERVE}"). '
+                                    f'Move box down: box_y < {by2 - LBL_RESERVE - b.h:.2f}')
+
+        # 3. 화살표 too-short (route + bidir) — MIN 0.44"
+        MIN_ARR = 0.44
+        EPS = 0.005  # float 오차 보정
+        for cmd in self._cmds:
+            if cmd[0] in ('route', 'bidir'):
+                pts = cmd[1]
+                for i in range(len(pts)-1):
+                    dx = pts[i+1][0]-pts[i][0]
+                    dy = pts[i+1][1]-pts[i][1]
+                    length = math.sqrt(dx*dx + dy*dy)
+                    if length < MIN_ARR - EPS:
+                        issues.append(
+                            f'Arrow segment too short ({length:.2f}"): '
+                            f'{pts[i]} → {pts[i+1]}. Min: {MIN_ARR}"')
+
+        # 4. T-junction 감지 (route만, 동일 시작점 3개 이상)
+        from collections import Counter
+        start_pts = []
+        for cmd in self._cmds:
+            if cmd[0] == 'route':
+                pts = cmd[1]
+                if pts:
+                    start_pts.append((round(pts[0][0], 2), round(pts[0][1], 2)))
+        for pt, cnt in Counter(start_pts).items():
+            if cnt >= 3:
+                issues.append(
+                    f'T-junction warning: {cnt} arrows share start point {pt}. '
+                    f'Use split_from_box() or separate start points.')
+
+        # 6a. 대각선 화살표 감지 (화살촉 가려짐 위험)
+        for cmd in self._cmds:
+            if cmd[0] == 'route':
+                pts = cmd[1]
+                for i in range(len(pts)-1):
+                    dx = abs(pts[i+1][0] - pts[i][0])
+                    dy = abs(pts[i+1][1] - pts[i][1])
+                    if dx > 0.01 and dy > 0.01:
+                        issues.append(
+                            f'Diagonal arrow segment: ({pts[i][0]:.2f},{pts[i][1]:.2f}) → '
+                            f'({pts[i+1][0]:.2f},{pts[i+1][1]:.2f}). '
+                            f'Use elbow (H+V) to avoid arrowhead clipping.')
+
+        # 6b. 참조번호 위치 검증 — 뒤에 붙으면 경고, 첫 줄 + \n 권장
+        import re
+        REF_PATTERN = re.compile(r'\b\d{3,4}\b')
+        CROSS_REF_PREFIXES = ('see ', 'ref. ', 'ref ', '(ref.', '(see')
+        for cmd in self._cmds:
+            if cmd[0] == 'box':
+                _, b, text, _ = cmd
+                short = text[:30].replace('\n', ' ')
+                lines = text.strip().split('\n')
+                if lines:
+                    last_line = lines[-1].strip()
+                    # 마지막 줄이 순수 참조번호이고 첫 줄이 아닌 경우
+                    if REF_PATTERN.fullmatch(last_line) and len(lines) > 1:
+                        issues.append(
+                            f'Box "{short}": ref "{last_line}" at END. Move to FIRST line + \\n')
+                    # 마지막 줄 끝에 참조번호가 붙어있는 경우
+                    if not REF_PATTERN.match(last_line) and REF_PATTERN.search(last_line):
+                        m = REF_PATTERN.findall(last_line)
+                        if m and last_line.endswith(m[-1]):
+                            ref_num = m[-1]
+                            ref_idx = last_line.rfind(ref_num)
+                            prefix = last_line[:ref_idx].strip().lower()
+                            is_cross_ref = any(prefix.endswith(p.strip()) for p in CROSS_REF_PREFIXES)
+                            if not is_cross_ref:
+                                issues.append(
+                                    f'Box "{short}": ref "{ref_num}" at end of '
+                                    f'"{last_line[:35]}". Move to FIRST line + \\n')
+
+        # 7. 화살표 양끝 도형 연결 (Dangling head/tail) 검증
+        EDGE_TOL = 0.15  # 허용 오차 (인치)
+        box_rects = [(b.left, b.bot, b.right, b.top) for b in self._box_refs]
+
+        def _near_box_edge(px, py):
+            for (bx_l, bx_b, bx_r, bx_t) in box_rects:
+                on_left   = abs(px - bx_l) < EDGE_TOL and bx_b - EDGE_TOL <= py <= bx_t + EDGE_TOL
+                on_right  = abs(px - bx_r) < EDGE_TOL and bx_b - EDGE_TOL <= py <= bx_t + EDGE_TOL
+                on_top    = abs(py - bx_t) < EDGE_TOL and bx_l - EDGE_TOL <= px <= bx_r + EDGE_TOL
+                on_bottom = abs(py - bx_b) < EDGE_TOL and bx_l - EDGE_TOL <= px <= bx_r + EDGE_TOL
+                if on_left or on_right or on_top or on_bottom:
+                    return True
+            return False
+
+        for cmd in self._cmds:
+            if cmd[0] in ('route', 'bidir'):
+                pts = cmd[1]
+                if len(pts) >= 2:
+                    src, dst = pts[0], pts[-1]
+                    if not _near_box_edge(src[0], src[1]):
+                        issues.append(
+                            f'Arrow src ({src[0]:.2f},{src[1]:.2f}) NOT on any box edge. '
+                            f'Dangling tail.')
+                    if not _near_box_edge(dst[0], dst[1]):
+                        issues.append(
+                            f'Arrow dst ({dst[0]:.2f},{dst[1]:.2f}) NOT on any box edge. '
+                            f'Dangling head.')
+
+        # 8. 라벨 있는 화살표 최소 길이 (라벨 구간 shaft ≥ 0.80")
+        MIN_LABELED = 0.80
+        for cmd in self._cmds:
+            if cmd[0] == 'route' and len(cmd) >= 4:
+                pts, lbl = cmd[1], cmd[2]
+                if lbl and len(pts) >= 2:
+                    lpos = cmd[3]
+                    if lpos is not None:
+                        i = max(0, min(lpos, len(pts) - 2))
+                    else:
+                        # 자동 배치: 가장 긴 구간 찾기
+                        i = max(range(len(pts)-1),
+                                key=lambda j: math.sqrt(
+                                    (pts[j+1][0]-pts[j][0])**2 +
+                                    (pts[j+1][1]-pts[j][1])**2))
+                    seg_len = math.sqrt(
+                        (pts[i+1][0]-pts[i][0])**2 +
+                        (pts[i+1][1]-pts[i][1])**2)
+                    if seg_len < MIN_LABELED - EPS:
+                        issues.append(
+                            f'Labeled arrow "{lbl}" segment too short ({seg_len:.2f}"). '
+                            f'Need {MIN_LABELED}" for label visibility.')
+
+        return issues

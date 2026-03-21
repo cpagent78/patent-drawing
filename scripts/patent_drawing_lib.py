@@ -949,6 +949,12 @@ class Drawing:
             return
         min_left  = min(b.left for b in self._box_refs)
         max_right = max(b.right for b in self._box_refs)
+
+        # layer boundary (non-page)의 좌우도 콘텐츠 범위에 포함
+        for cmd in self._cmds:
+            if cmd[0] == 'boundary' and not cmd[6]:  # is_page=False → layer
+                min_left  = min(min_left, cmd[1])
+                max_right = max(max_right, cmd[3])
         content_cx = (min_left + max_right) / 2
         page_cx = PAGE_W / 2
         dx = page_cx - content_cx

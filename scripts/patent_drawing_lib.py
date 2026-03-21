@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v6.2
+patent_drawing_lib.py  v7.0
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -215,18 +215,20 @@ class Drawing:
         self._nodes.append(nd)
         return nd
 
-    def connect(self, src: 'NodeDef', dst: 'NodeDef', label=""):
+    def connect(self, src: 'NodeDef', dst: 'NodeDef', label="", bidir=False):
         """
-        엣지 등록 (src → dst).
+        엣지 등록 (src → dst, 또는 bidir=True로 양방향).
         layout() 전에 호출; 실제 화살표는 layout() 시 생성.
 
         사용:
-            d.connect(exhibitor, network)
-            d.connect(network, device, label='request')
+            d.connect(exhibitor, network)              # 단방향
+            d.connect(network, device, label='request') # 단방향 + 라벨
+            d.connect(gen1, bus_node, bidir=True)       # 양방향
         """
-        self._edges.append((src, dst, label))
+        self._edges.append((src, dst, label, bidir))
 
-    def layout(self, direction='LR', gap=1.10, pad_x=None, pad_y=None):
+    def layout(self, direction='LR', gap=1.10, pad_x=None, pad_y=None,
+               boundary_label=""):
         """
         Graph-first 레이아웃 실행.
         1. 모든 노드 텍스트 크기 측정
@@ -261,7 +263,9 @@ class Drawing:
         adj = defaultdict(list)
         node_set = set(id(n) for n in self._nodes)
 
-        for src, dst, _ in self._edges:
+        for edge in self._edges:
+            src, dst = edge[0], edge[1]
+            # 레이어 계산은 항상 단방향 (src→dst) — bidir은 렌더링만 양방향
             adj[id(src)].append(dst)
             in_degree[id(dst)] += 1
 
@@ -425,7 +429,7 @@ class Drawing:
                 cur_y -= (lh + INTER_LAYER_GAP)
 
         # Step 4: boundary 고정 (USPTO 표준)
-        self.boundary(BND_X1, BND_Y1, BND_X2, BND_Y2)
+        self.boundary(BND_X1, BND_Y1, BND_X2, BND_Y2, label=boundary_label)
 
         # Step 5: 엣지 → 화살표 자동 생성
         # LR 방향: 레이어별 경계 x 사전 계산 (via_x를 레이어 경계 중간으로 고정)
@@ -441,47 +445,62 @@ class Drawing:
                     min_left  = min(nd.box_ref.left for nd in layers[li+1] if nd.box_ref)
                     layer_boundary_xs[li] = (max_right + min_left) / 2  # 레이어 간 중간 x
 
-        for src, dst, lbl in self._edges:
+        for edge in self._edges:
+            src, dst, lbl = edge[0], edge[1], edge[2]
+            bidir = edge[3] if len(edge) > 3 else False
             if src.box_ref is None or dst.box_ref is None:
                 continue
             sb, db = src.box_ref, dst.box_ref
             if direction == 'LR':
                 if sb.right < db.left - 0.01:
                     if abs(sb.cy - db.cy) < 0.02:
-                        # 같은 높이 → 직선
-                        self.arrow_route([sb.right_mid(), db.left_mid()], label=lbl)
+                        if bidir:
+                            self.arrow_bidir(sb, db, side='h')
+                        else:
+                            self.arrow_route([sb.right_mid(), db.left_mid()], label=lbl)
                     else:
-                        # via_x: sb.right + 0.44" (첫 segment 보장)
-                        # via_x → db.left 도 0.44" 이상이어야 함
                         MIN_S = 0.44
                         via_x = sb.right + MIN_S
                         if db.left - via_x < MIN_S:
-                            # 공간 부족: 중간점 사용 (검증 경고는 발생하지만 최선)
                             via_x = (sb.right + db.left) / 2
-                        self.arrow_route([
+                        pts = [
                             sb.right_mid(),
                             (via_x, sb.cy),
                             (via_x, db.cy),
                             db.left_mid(),
-                        ], label=lbl)
+                        ]
+                        if bidir:
+                            self.arrow_bidir_route(pts)
+                        else:
+                            self.arrow_route(pts, label=lbl)
                 else:
-                    # 역방향: 아래 우회
-                    self.arrow_route([
+                    pts = [
                         sb.bot_mid(),
                         (sb.cx, sb.bot - 0.40),
                         (db.cx, db.bot - 0.40),
                         db.bot_mid(),
-                    ], label=lbl)
+                    ]
+                    if bidir:
+                        self.arrow_bidir_route(pts)
+                    else:
+                        self.arrow_route(pts, label=lbl)
             else:  # TB
                 if sb.bot > db.top + 0.01:
-                    self.arrow_v(sb, db, label=lbl)
+                    if bidir:
+                        self.arrow_bidir(sb, db, side='v')
+                    else:
+                        self.arrow_v(sb, db, label=lbl)
                 else:
-                    self.arrow_route([
+                    pts = [
                         sb.right_mid(),
                         (sb.right + 0.40, sb.cy),
                         (sb.right + 0.40, db.cy),
                         db.right_mid(),
-                    ], label=lbl)
+                    ]
+                    if bidir:
+                        self.arrow_bidir_route(pts)
+                    else:
+                        self.arrow_route(pts, label=lbl)
 
         self.fig_label()
 
@@ -985,7 +1004,7 @@ class Drawing:
 
         # 6b. 참조번호 위치 검증 — 뒤에 붙으면 경고, 첫 줄 + \n 권장
         import re
-        REF_PATTERN = re.compile(r'\b\d{3,4}\b')
+        REF_PATTERN = re.compile(r'\b\d{2,4}\b')
         CROSS_REF_PREFIXES = ('see ', 'ref. ', 'ref ', '(ref.', '(see')
         for cmd in self._cmds:
             if cmd[0] == 'box':
@@ -1121,7 +1140,7 @@ class Drawing:
 
         # 9c. 박스 참조번호 완전 누락 감지
         # 박스 텍스트 첫 줄이 3~4자리 숫자가 아니면 참조번호 없는 것으로 간주
-        REF_FIRST_LINE = re.compile(r'^\d{3,4}$')
+        REF_FIRST_LINE = re.compile(r'^\d{2,4}$')
         for cmd in self._cmds:
             if cmd[0] == 'box':
                 _, b, text, _ = cmd

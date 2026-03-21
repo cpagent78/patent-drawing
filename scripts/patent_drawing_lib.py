@@ -1,5 +1,5 @@
 """
-patent_drawing_lib.py  v5.3
+patent_drawing_lib.py  v5.4
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
@@ -16,6 +16,10 @@ USPTO-Compliant Patent Drawing Library
         - arrow_bidir(): 직선 양방향 (단일 선 양쪽 화살촉)
         - arrow_bidir_route(): elbow 양방향
         - 양방향 elbow 규칙: 각 연결마다 전용 채널 x
+
+  v5.4  텍스트 박스 초과 감지 추가:
+        - validate: 텍스트가 박스 경계를 벗어나는지 실측 검증
+          (renderer를 통해 실제 렌더링 크기 측정 후 박스 크기와 비교)
 
   v5.3  USPTO 규칙 추가 코드화 (LLM 몫 → 코드로):
         - validate: 텍스트 최소 10pt 미달 경고 (auto-fit 결과 기준)
@@ -135,6 +139,7 @@ class Drawing:
         self.dpi       = dpi
         self._cmds     = []
         self._box_refs = []
+        self._box_text_sizes = {}  # id(BoxRef) → (tw_in, th_in) 실측 텍스트 크기
 
         self.fig, self.ax = plt.subplots(figsize=(PAGE_W, PAGE_H))
         self.ax.set_xlim(0, PAGE_W)
@@ -322,11 +327,18 @@ class Drawing:
                     linewidth=LW_BOX, zorder=Z_BOX_EDGE))
                 fs = self._fit_font(text, b.w-0.18, b.h-0.10,
                                     fs_override or FS_BODY)
-                ax.text(b.cx, b.cy, text,
+                t_obj = ax.text(b.cx, b.cy, text,
                         ha='center', va='center',
                         fontsize=fs, fontweight=FW,
                         multialignment='center', wrap=False,
                         zorder=Z_BOX_TEXT)
+                # 실측 텍스트 크기 저장 (validate에서 박스 초과 검사용)
+                try:
+                    self.fig.canvas.draw()
+                    bb = t_obj.get_window_extent(renderer=self.fig.canvas.get_renderer())
+                    self._box_text_sizes[id(b)] = (bb.width / self.dpi, bb.height / self.dpi)
+                except Exception:
+                    pass
 
         # Pass 5: 독립 라벨
         for cmd in self._cmds:
@@ -663,6 +675,26 @@ class Drawing:
                         issues.append(
                             f'Labeled arrow "{lbl}" segment too short ({seg_len:.2f}"). '
                             f'Need {MIN_LABELED}" for label visibility.')
+
+        # 0. 텍스트가 박스 경계를 벗어나는지 실측 검증
+        # _fit_font()가 폰트를 줄여도 실제 렌더링 크기가 박스를 넘는지 다시 확인
+        for cmd in self._cmds:
+            if cmd[0] == 'box':
+                _, b, text, fs_override = cmd
+                short = text[:30].replace('\n', ' ')
+                if id(b) in self._box_text_sizes:
+                    tw_in, th_in = self._box_text_sizes[id(b)]
+                    # 패딩 없이 박스 크기와 직접 비교 (더 엄격하게)
+                    if tw_in > b.w + 0.01:
+                        issues.append(
+                            f'Box "{short}": text overflows horizontally '
+                            f'(text={tw_in:.2f}", box={b.w:.2f}"). '
+                            f'Increase box width to at least {tw_in + 0.15:.2f}".')
+                    if th_in > b.h + 0.01:
+                        issues.append(
+                            f'Box "{short}": text overflows vertically '
+                            f'(text={th_in:.2f}", box={b.h:.2f}"). '
+                            f'Increase box height to at least {th_in + 0.12:.2f}".')
 
         # 9a. 텍스트 최소 10pt 검증 (§1.84(p)(3))
         MIN_FS = 10.0

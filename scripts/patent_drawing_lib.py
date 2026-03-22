@@ -224,6 +224,40 @@ class BoxRef:
                 self.y - margin < y < self.top + margin)
 
 
+# ── CloudRef ──────────────────────────────────────────────────────────────────
+class CloudRef(BoxRef):
+    """
+    Cloud 도형용 BoxRef 확장.
+    edge_toward()가 타원 경계를 기준으로 교차점을 계산하므로
+    화살표가 구름 내부로 들어가지 않음.
+    """
+    def __init__(self, cx, cy, w, h):
+        super().__init__(cx - w/2, cy - h/2, w, h)
+        self._ea = w / 2   # 타원 가로 반축
+        self._eb = h / 2   # 타원 세로 반축
+
+    def edge_toward(self, tx, ty, gap=0.08):
+        """타원 경계 교차점 계산 → 화살표가 구름 밖에서 출발/도착."""
+        import math
+        dx = tx - self.cx
+        dy = ty - self.cy
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist < 1e-9:
+            return (self.cx, self.cy)
+        ux, uy = dx/dist, dy/dist
+        # 타원 방정식 (ux*t/ea)^2 + (uy*t/eb)^2 = 1 → t 계산
+        denom = (ux/self._ea)**2 + (uy/self._eb)**2
+        if denom < 1e-12:
+            return (self.cx, self.cy)
+        t = math.sqrt(1.0 / denom)
+        return (self.cx + ux*(t + gap), self.cy + uy*(t + gap))
+
+    def left_mid(self):  return (self.cx - self._ea, self.cy)
+    def right_mid(self): return (self.cx + self._ea, self.cy)
+    def top_mid(self):   return (self.cx, self.cy + self._eb)
+    def bot_mid(self):   return (self.cx, self.cy - self._eb)
+
+
 # ── Drawing ───────────────────────────────────────────────────────────────────
 class Drawing:
 
@@ -1215,7 +1249,7 @@ class Drawing:
         사용:
             c = d.cloud(4.0, 5.5, 1.8, 1.2, '310\nCloud')
         """
-        b = BoxRef(cx - w/2, cy - h/2, w, h)
+        b = CloudRef(cx, cy, w, h)   # 타원 기반 edge 계산
         self._box_refs.append(b)
         self._cmds.append(('cloud', cx, cy, w, h, text, fs or FS_BODY, b))
         return b

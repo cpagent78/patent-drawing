@@ -119,3 +119,47 @@
 ## GitHub
 - 라이브러리: https://github.com/cpagent78/patent-drawing
 - 마지막 커밋: `e0fecd1` (flow TB: unify box width across all layers)
+
+---
+
+## v2.0 태성 Session (2026-03-22 오후~밤)
+
+### 신규 도형
+- **cloud()**: 타원 기반 구름 shape. 원 12개 배치, 교차점 정확 계산, 외곽 호만 렌더
+- **CloudRef**: 타원+bubble_r 기반 edge_toward() → 화살표가 구름 안으로 침범 불가
+- **autocloud()**: 텍스트 실측 후 구름 크기 자동 결정 + max_w 래핑
+- **iot_stack()**: 사각형 n개 비스듬히 겹쳐서 복수 디바이스 표현
+- **brace()**: 중괄호 그룹 표시 (right/bottom)
+
+### 신규 기능
+- **ref_callout()**: USPTO callout (tilde: sine wave 직접 그리기 / curve: 베지에)
+  - 진폭 거리 비례 (짧으면 직선, 길면 물결)
+  - strip_ref=True: 박스 내 참조번호 자동 제거 (중복 방지)
+  - 라벨 겹침 자동 분산
+  - z-order 최상위 (container fill에 안 가려짐)
+- **ref_callout_bus()**: 버스선 빈 공간 자동 탐색 → callout 배치
+- **arrow_fork_bidir()**: 1개 박스 → N개 목적지 양방향 fork
+- **arrow_to_cloud_child()**: Cloud 내부 도형과 외부 도형 연결 (Cloud 통과)
+- **arrow_diagonal_bidir()**: 대각선 양방향 화살표
+
+### 코드 강제 (LLM 실수 방지)
+- **box() 자동 확장**: 텍스트+패딩 부족 시 w/h 자동 증가. container(layer) 폭 초과 방지
+- **arrow_h/v/bidir 자동 edge 감지**: 박스 상대 위치로 left/right/top/bot 자동 선택 (관통 방지)
+- **layer() dash 패턴 차별화**: long(외곽)/short(dash-dot)/dotted/solid
+
+### 검증 추가
+- **#12**: 공간 낭비 (usage < 65%) 경고
+- **#12b**: line-line 접합 검증 (리더 라인이 대상에 안 닿으면 경고)
+- **#13**: 도형 간 겹침 감지 (부분 겹침 → 경고, 완전 포함(container) → 허용)
+- **#14**: container < child overflow 감지
+- **CloudRef edge 예외**: _on_cloud_edge() 함수로 dangling 오탐 방지
+
+### 버그 수정
+- equalize_heights/widths property setter 오류
+- ref_callout S자 곡선 (P2 방향 수정)
+- Cloud 내부 경계선 노출 → 타원 fill + 교차점 호만 렌더
+- box() 내 _normalize_node_text 재호출 제거
+
+### GitHub Tags
+- v1.0-andy-session: Andy 세션 마지막 (7a23b16)
+- v2.0-taesung-session: 태성 세션 마지막 (018fda2)

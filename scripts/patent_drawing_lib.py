@@ -1378,6 +1378,26 @@ class Drawing:
         ex, ey = box_b.edge_toward(box_a.cx, box_a.cy, gap)
         self._cmds.append(('bidir', [(sx, sy), (ex, ey)]))
 
+    def arrow_to_cloud_child(self, external: BoxRef, cloud: 'CloudRef',
+                              internal: BoxRef, bidir=True, gap=0.05):
+        """
+        Cloud 내부 도형과 외부 도형을 연결하는 화살표.
+        Cloud를 통과하여 internal 박스까지 직선으로 연결.
+        external ↔ internal (cloud 통과)
+        bidir=True: 양방향, False: external→internal 단방향
+        사용:
+            server = d.box(...)   # cloud 내부
+            d.arrow_to_cloud_child(iot, cloud, server, bidir=True)
+        """
+        # 출발점: external에서 internal 방향으로 external edge
+        sx, sy = external.edge_toward(internal.cx, internal.cy, gap)
+        # 도착점: internal에서 external 방향으로 internal edge (gap 최소)
+        ex, ey = internal.edge_toward(external.cx, external.cy, gap)
+        if bidir:
+            self._cmds.append(('bidir', [(sx, sy), (ex, ey)]))
+        else:
+            self._cmds.append(('route', [(sx, sy), (ex, ey)], '', None, None))
+
     def arrow_route(self, steps, label="", label_pos=1,
                     label_dx=0.18, label_ha='left', ls='-'):
         """

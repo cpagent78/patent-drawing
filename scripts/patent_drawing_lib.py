@@ -189,6 +189,7 @@ class Drawing:
         self._cmds     = []
         self._box_refs = []
         self._box_text_sizes = {}  # id(BoxRef) → (tw_in, th_in) 실측 텍스트 크기
+        self._label_extents  = []  # 독립 라벨 실측 범위 [{x0,x1,y0,y1,text}]
         # Graph-first API
         self._nodes: list['NodeDef'] = []
         self._edges: list[tuple] = []  # (src_NodeDef, dst_NodeDef, label)
@@ -1218,10 +1219,17 @@ class Drawing:
                         multialignment='center', wrap=False,
                         zorder=Z_BOX_TEXT)
                 # 실측 텍스트 크기 저장 (validate에서 박스 초과 검사용)
+                # axes.transData.inverted() 방식으로 정확한 인치 단위 측정
                 try:
                     self.fig.canvas.draw()
-                    bb = t_obj.get_window_extent(renderer=self.fig.canvas.get_renderer())
-                    self._box_text_sizes[id(b)] = (bb.width / self.dpi, bb.height / self.dpi)
+                    renderer = self.fig.canvas.get_renderer()
+                    bb = t_obj.get_window_extent(renderer=renderer)
+                    inv = ax.transData.inverted()
+                    pt0 = inv.transform((bb.x0, bb.y0))
+                    pt1 = inv.transform((bb.x1, bb.y1))
+                    tw_data = abs(pt1[0] - pt0[0])
+                    th_data = abs(pt1[1] - pt0[1])
+                    self._box_text_sizes[id(b)] = (tw_data, th_data)
                 except Exception:
                     pass
 
@@ -1229,9 +1237,24 @@ class Drawing:
         for cmd in self._cmds:
             if cmd[0] == 'label':
                 _, x, y, text, ha, fs = cmd
-                ax.text(x, y, text, ha=ha, va='center',
+                t_lbl = ax.text(x, y, text, ha=ha, va='center',
                         fontsize=fs, fontweight=FW,
                         bbox=LABEL_BG, zorder=Z_SEC_LABEL)
+                # 독립 라벨 실측 크기 저장 (boundary 초과 검증용)
+                try:
+                    self.fig.canvas.draw()
+                    renderer = self.fig.canvas.get_renderer()
+                    bb = t_lbl.get_window_extent(renderer=renderer)
+                    inv = ax.transData.inverted()
+                    pt0 = inv.transform((bb.x0, bb.y0))
+                    pt1 = inv.transform((bb.x1, bb.y1))
+                    self._label_extents.append({
+                        'x0': min(pt0[0], pt1[0]), 'x1': max(pt0[0], pt1[0]),
+                        'y0': min(pt0[1], pt1[1]), 'y1': max(pt0[1], pt1[1]),
+                        'text': text[:30],
+                    })
+                except Exception:
+                    pass
 
         # Pass 6: FIG. 라벨
         for cmd in self._cmds:
@@ -1579,15 +1602,36 @@ class Drawing:
                             f'Labeled arrow "{lbl}" segment too short ({seg_len:.2f}"). '
                             f'Need {MIN_LABELED}" for label visibility.')
 
-        # 0. 텍스트가 박스 경계를 벗어나는지 실측 검증
-        # _fit_font()가 폰트를 줄여도 실제 렌더링 크기가 박스를 넘는지 다시 확인
+        # 3b. 독립 라벨 실측 boundary 초과 검증 (기존 #3은 좌표만 봄 → 렌더링 크기 기반으로 강화)
+        if bnd_rect and self._label_extents:
+            bx1, by1, bx2, by2 = bnd_rect
+            for le in self._label_extents:
+                short = le['text']
+                if le['x0'] < bx1 - 0.02:
+                    issues.append(
+                        f'Label "{short}": left edge ({le["x0"]:.2f}") outside boundary left ({bx1:.2f}"). '
+                        f'Move label right or reduce text.')
+                if le['x1'] > bx2 + 0.02:
+                    issues.append(
+                        f'Label "{short}": right edge ({le["x1"]:.2f}") outside boundary right ({bx2:.2f}"). '
+                        f'Move label left or reduce text.')
+                if le['y0'] < by1 - 0.02:
+                    issues.append(
+                        f'Label "{short}": bottom edge ({le["y0"]:.2f}") outside boundary bottom ({by1:.2f}"). '
+                        f'Move label up.')
+                if le['y1'] > by2 + 0.02:
+                    issues.append(
+                        f'Label "{short}": top edge ({le["y1"]:.2f}") outside boundary top ({by2:.2f}"). '
+                        f'Move label down.')
+
+        # 0. 텍스트가 박스 경계를 벗어나는지 실측 검증 (axes.transData 기반 정확한 측정)
         for cmd in self._cmds:
             if cmd[0] == 'box':
                 _, b, text, fs_override = cmd
                 short = text[:30].replace('\n', ' ')
                 if id(b) in self._box_text_sizes:
                     tw_in, th_in = self._box_text_sizes[id(b)]
-                    # 패딩 없이 박스 크기와 직접 비교 (더 엄격하게)
+                    # 박스 내부 여백(pad) 제외하고 비교
                     if tw_in > b.w + 0.01:
                         issues.append(
                             f'Box "{short}": text overflows horizontally '

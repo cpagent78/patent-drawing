@@ -228,16 +228,25 @@ class BoxRef:
 class CloudRef(BoxRef):
     """
     Cloud 도형용 BoxRef 확장.
-    edge_toward()가 타원 경계를 기준으로 교차점을 계산하므로
-    화살표가 구름 내부로 들어가지 않음.
+    실제 구름 외곽 = 타원 + bubble_r 이므로
+    edge_toward()는 (ea + bubble_r) 타원을 기준으로 교차점 계산.
+    화살표가 구름 윤곽 바깥에서 출발/도착 보장.
     """
     def __init__(self, cx, cy, w, h):
+        import numpy as np
         super().__init__(cx - w/2, cy - h/2, w, h)
-        self._ea = w / 2   # 타원 가로 반축
-        self._eb = h / 2   # 타원 세로 반축
+        ea, eb = w / 2, h / 2
+        # _render_cloud와 동일한 bubble_r 계산
+        N = 12
+        perim = np.pi * (3*(ea+eb) - np.sqrt((3*ea+eb)*(ea+3*eb)))
+        bubble_r = perim / N * 0.58
+        # 실제 구름 외곽 타원 반축 = 기준 타원 + bubble_r
+        self._ea = ea + bubble_r
+        self._eb = eb + bubble_r
+        self._bubble_r = bubble_r
 
-    def edge_toward(self, tx, ty, gap=0.08):
-        """타원 경계 교차점 계산 → 화살표가 구름 밖에서 출발/도착."""
+    def edge_toward(self, tx, ty, gap=0.05):
+        """(타원+bubble_r) 경계 교차점 → 화살표가 구름 실제 외곽 밖에서 출발/도착."""
         import math
         dx = tx - self.cx
         dy = ty - self.cy
@@ -245,7 +254,6 @@ class CloudRef(BoxRef):
         if dist < 1e-9:
             return (self.cx, self.cy)
         ux, uy = dx/dist, dy/dist
-        # 타원 방정식 (ux*t/ea)^2 + (uy*t/eb)^2 = 1 → t 계산
         denom = (ux/self._ea)**2 + (uy/self._eb)**2
         if denom < 1e-12:
             return (self.cx, self.cy)
@@ -1983,16 +1991,29 @@ class Drawing:
                         return True
             return False
 
+        # CloudRef 목록 (확장 타원 edge 허용)
+        cloud_refs = [b for b in self._box_refs if isinstance(b, CloudRef)]
+
+        def _on_cloud_edge(px, py):
+            """CloudRef의 확장 타원(ea+bubble_r) 위에 있는 점인지 확인."""
+            for cr in cloud_refs:
+                dx, dy = px - cr.cx, py - cr.cy
+                # 확장 타원 위 ± EDGE_TOL
+                val = (dx / cr._ea)**2 + (dy / cr._eb)**2
+                if 0.70 <= val <= 1.60:   # 타원 근방 (여유있게)
+                    return True
+            return False
+
         for cmd in self._cmds:
             if cmd[0] in ('route', 'bidir'):
                 pts = cmd[1]
                 if len(pts) >= 2:
                     src, dst = pts[0], pts[-1]
-                    if not _near_box_edge(src[0], src[1]) and not _on_bus_line(src[0], src[1]):
+                    if not _near_box_edge(src[0], src[1]) and not _on_bus_line(src[0], src[1]) and not _on_cloud_edge(src[0], src[1]):
                         issues.append(
                             f'Arrow src ({src[0]:.2f},{src[1]:.2f}) NOT on any box edge. '
                             f'Dangling tail.')
-                    if not _near_box_edge(dst[0], dst[1]) and not _on_bus_line(dst[0], dst[1]):
+                    if not _near_box_edge(dst[0], dst[1]) and not _on_bus_line(dst[0], dst[1]) and not _on_cloud_edge(dst[0], dst[1]):
                         issues.append(
                             f'Arrow dst ({dst[0]:.2f},{dst[1]:.2f}) NOT on any box edge. '
                             f'Dangling head.')

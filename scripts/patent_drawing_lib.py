@@ -1388,6 +1388,33 @@ class Drawing:
         ex, ey = box_b.edge_toward(box_a.cx, box_a.cy, gap)
         self._cmds.append(('route', [(sx, sy), (ex, ey)], '', None, None))
 
+    def arrow_fork_bidir(self, src: BoxRef, destinations: list, via_x: float = None):
+        """
+        1개 박스에서 N개 목적지로 양방향 fork.
+        src 우측 변을 N등분하여 각 출발점에서 독립 양방향 화살표.
+        via_x: 중간 꺾임 x 좌표 (기본: src.right + 0.5")
+
+        사용:
+            d.arrow_fork_bidir(iface, [sensors, actuators])
+            d.arrow_fork_bidir(iface, [sensors, actuators], via_x=5.8)
+        """
+        n = len(destinations)
+        if n == 0:
+            return
+        if via_x is None:
+            via_x = src.right + 0.50
+
+        # src 우측 변을 n등분 (위→아래)
+        step = src.h / (n + 1)
+        start_ys = [src.top - step * (i + 1) for i in range(n)]
+
+        for i, (dst, sy) in enumerate(zip(destinations, start_ys)):
+            src_pt = (src.right, sy)
+            dst_pt = dst.left_mid()
+            # via_x → dst.cy로 꺾임
+            mid_pt = (via_x, dst.cy)
+            self._cmds.append(('bidir', [src_pt, (via_x, sy), mid_pt, dst_pt]))
+
     def arrow_diagonal_bidir(self, box_a: BoxRef, box_b: BoxRef, gap=0.08):
         """
         두 박스 사이 직선 대각선 양방향 화살표 (↔).

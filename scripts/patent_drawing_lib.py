@@ -1196,6 +1196,7 @@ class Drawing:
     def box(self, x, y, w, h, text, fs=None) -> BoxRef:
         """
         박스 추가. w/h가 텍스트+패딩보다 작으면 자동 확장.
+        단, 자기가 속한 layer(container)보다 커지지 않도록 제한.
         text 형식: "102\\nCPU" (파이프 문자 금지)
         """
         # 텍스트 실측 → w/h가 부족하면 자동 확장
@@ -1203,6 +1204,19 @@ class Drawing:
         tw, th = self.measure_text(text, fs or FS_BODY)
         min_w = tw + MIN_PAD_W
         min_h = th + MIN_PAD_H
+
+        # container(layer) 폭 제한 찾기
+        cx_box = x + w / 2
+        cy_box = y + h / 2
+        max_w_from_layer = 9999
+        for cmd in self._cmds:
+            if cmd[0] == 'boundary' and not cmd[6]:  # layer
+                lx1, ly1, lx2, ly2 = cmd[1], cmd[2], cmd[3], cmd[4]
+                if lx1 - 0.1 < cx_box < lx2 + 0.1 and ly1 - 0.1 < cy_box < ly2 + 0.1:
+                    max_w_from_layer = min(max_w_from_layer, (lx2 - lx1) - 0.12)
+
+        min_w = min(min_w, max_w_from_layer)
+
         if w < min_w:
             cx = x + w / 2
             w = min_w
@@ -1884,12 +1898,19 @@ class Drawing:
                     wave_start_x = edge_x
                     wave_end_x = final_x - txt_w * 0.02
 
-                # 물결선 그리기 (sine wave)
+                # 거리에 따라 자동 스타일: 짧으면 곡선, 길면 sine
+                wave_len = abs(wave_end_x - wave_start_x)
                 n_pts = 30
                 wx = np.linspace(wave_start_x, wave_end_x, n_pts)
-                wave_amp = 0.03  # 물결 진폭
-                n_cycles = 2
-                wy = anc_y + wave_amp * np.sin(n_cycles * 2 * np.pi * np.linspace(0, 1, n_pts))
+                if wave_len < 0.20:
+                    # 짧은 거리: 단순 S자 곡선 (bezier느낌)
+                    wave_amp = 0.025
+                    wy = anc_y + wave_amp * np.sin(np.pi * np.linspace(0, 1, n_pts))
+                else:
+                    # 긴 거리: sine wave
+                    wave_amp = 0.03
+                    n_cycles = max(2, int(wave_len / 0.08))
+                    wy = anc_y + wave_amp * np.sin(n_cycles * 2 * np.pi * np.linspace(0, 1, n_pts))
                 ax.plot(wx, wy, color=BOX_EDGE, lw=LW_BOX * 0.7,
                         solid_capstyle='round', zorder=Z_FIG_LABEL + 1)
 
@@ -2532,5 +2553,64 @@ class Drawing:
                     f'Space usage {usage*100:.0f}%: boundary height {bnd_h:.1f}" but '
                     f'content height {content_h:.1f}". Consider reducing boundary or '
                     f'increasing content spacing for better space utilization.')
+
+        # 13. 도형 간 겹침 감지 (box-box, box-cloud overlap)
+        for i, b1 in enumerate(self._box_refs):
+            for j, b2 in enumerate(self._box_refs):
+                if j <= i:
+                    continue
+                # CloudRef는 타원 반축(_ea, _eb) 사용
+                if isinstance(b1, CloudRef):
+                    r1_l, r1_r = b1.cx - b1._ea, b1.cx + b1._ea
+                    r1_b, r1_t = b1.cy - b1._eb, b1.cy + b1._eb
+                else:
+                    r1_l, r1_r, r1_b, r1_t = b1.left, b1.right, b1.bot, b1.top
+                if isinstance(b2, CloudRef):
+                    r2_l, r2_r = b2.cx - b2._ea, b2.cx + b2._ea
+                    r2_b, r2_t = b2.cy - b2._eb, b2.cy + b2._eb
+                else:
+                    r2_l, r2_r, r2_b, r2_t = b2.left, b2.right, b2.bot, b2.top
+                # 겹침 감지 (완전 포함은 제외 — container-child 관계)
+                overlap_x = r1_l < r2_r and r1_r > r2_l
+                overlap_y = r1_b < r2_t and r1_t > r2_b
+                if overlap_x and overlap_y:
+                    # 한쪽이 다른쪽을 완전히 포함하면 container-child → skip
+                    contains_1in2 = (r2_l <= r1_l and r1_r <= r2_r and r2_b <= r1_b and r1_t <= r2_t)
+                    contains_2in1 = (r1_l <= r2_l and r2_r <= r1_r and r1_b <= r2_b and r2_t <= r1_t)
+                    if not contains_1in2 and not contains_2in1:
+                        # 부분 겹침 → 경고
+                        t1 = ''
+                        t2 = ''
+                        for c in self._cmds:
+                            if c[0] == 'box' and c[1] is b1: t1 = c[2][:20].replace('\n',' ')
+                            if c[0] == 'box' and c[1] is b2: t2 = c[2][:20].replace('\n',' ')
+                            if c[0] == 'cloud' and c[7] is b1: t1 = c[5][:20].replace('\n',' ')
+                            if c[0] == 'cloud' and c[7] is b2: t2 = c[5][:20].replace('\n',' ')
+                        issues.append(
+                            f'Box overlap: "{t1}" and "{t2}" partially overlap. '
+                            f'Adjust positions to avoid collision.')
+
+        # 14. container(layer) < child(box) 감지
+        for cmd in self._cmds:
+            if cmd[0] == 'boundary' and not cmd[6]:  # layer (not page boundary)
+                _, lx1, ly1, lx2, ly2, lbl, _ = cmd
+                display_lbl = lbl.split('|')[0] if '|' in lbl else lbl
+                for bcmd in self._cmds:
+                    if bcmd[0] == 'box':
+                        b = bcmd[1]
+                        # 박스가 layer 안에 있는지 먼저 확인 (중심이 layer 안)
+                        in_layer = (lx1 - 0.10 < b.cx < lx2 + 0.10 and
+                                    ly1 - 0.10 < b.cy < ly2 + 0.10)
+                        if in_layer:
+                            if b.left < lx1 - 0.02:
+                                issues.append(
+                                    f'Box "{bcmd[2][:20].replace(chr(10)," ")}" left ({b.left:.2f}) '
+                                    f'exceeds layer "{display_lbl}" left ({lx1:.2f}). '
+                                    f'Enlarge container or shrink box.')
+                            if b.right > lx2 + 0.02:
+                                issues.append(
+                                    f'Box "{bcmd[2][:20].replace(chr(10)," ")}" right ({b.right:.2f}) '
+                                    f'exceeds layer "{display_lbl}" right ({lx2:.2f}). '
+                                    f'Enlarge container or shrink box.')
 
         return issues

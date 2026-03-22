@@ -1714,17 +1714,17 @@ class Drawing:
         dep = offset * 0.6   # 출발 방향 컨트롤 거리
 
         if side == 'top-left':
-            anc = (box.left, box.top - box.h * 0.25)   # 좌측 변 상단 1/4
-            dep_dir = (-1, 0)                           # 왼쪽으로 출발
-            txt_x = box.left - offset
-            txt_y = box.top + offset * 0.5
-            ha, va = 'right', 'center'
+            anc = (box.left + box.w * 0.25, box.top)   # 상단 변 좌측 1/4
+            dep_dir = (0, 1)                            # 위쪽으로 출발
+            txt_x = box.left - offset * 0.5
+            txt_y = box.top + offset
+            ha, va = 'right', 'bottom'
         elif side == 'top-right':
-            anc = (box.right, box.top - box.h * 0.25)  # 우측 변 상단 1/4
-            dep_dir = (1, 0)                            # 오른쪽으로 출발
-            txt_x = box.right + offset
-            txt_y = box.top + offset * 0.5
-            ha, va = 'left', 'center'
+            anc = (box.left + box.w * 0.75, box.top)   # 상단 변 우측 3/4
+            dep_dir = (0, 1)                            # 위쪽으로 출발
+            txt_x = box.right + offset * 0.5
+            txt_y = box.top + offset
+            ha, va = 'left', 'bottom'
         elif side == 'top':
             anc = (box.cx, box.top)                     # 상단 변 중앙
             dep_dir = (0, 1)                            # 위로 출발

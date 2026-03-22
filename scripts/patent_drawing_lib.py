@@ -109,6 +109,22 @@ Z_SEC_LABEL = 21
 Z_FIG_LABEL = 22
 
 
+def _normalize_node_text(text: str) -> str:
+    """
+    노드 텍스트 정규화:
+    - 참조번호 뒤 첫 \\n은 유지 (번호/본문 분리)
+    - 그 이후의 추가 \\n은 스페이스로 치환 (불필요한 래핑 방지)
+    예: '340\\nBid Transmission\\nto Price Tags'
+      → '340\\nBid Transmission to Price Tags'
+    """
+    parts = text.split('\n', 1)   # 첫 \n 기준으로 최대 2분할
+    if len(parts) == 2:
+        ref, body = parts
+        body = body.replace('\n', ' ')   # 본문 내 추가 \n → 스페이스
+        return ref + '\n' + body
+    return text
+
+
 # ── NodeDef ───────────────────────────────────────────────────────────────────
 class NodeDef:
     """
@@ -212,6 +228,9 @@ class Drawing:
             exhibitor = d.node('110\\nexhibitor')
             network   = d.node('130\\nwired/wireless\\ncommunication network')
         """
+        # 참조번호 뒤(첫 \n 이후) 추가 개행을 스페이스로 치환
+        # → LLM/에이전트가 무의식적으로 넣는 \n을 자동 제거
+        text = _normalize_node_text(text)
         nd = NodeDef(text, fs=fs, pad_x=pad_x, pad_y=pad_y)
         self._nodes.append(nd)
         return nd
@@ -1052,11 +1071,46 @@ class Drawing:
         """
         박스 추가. 텍스트 폰트 자동 축소.
         text 형식: "102\\nCPU" (파이프 문자 금지)
+        참조번호 뒤 불필요한 \\n은 자동으로 스페이스로 치환됨.
         """
+        text = _normalize_node_text(text)
         b = BoxRef(x, y, w, h)
         self._box_refs.append(b)
         self._cmds.append(('box', b, text, fs))
         return b
+
+    def equalize_heights(self, boxes: list) -> float:
+        """
+        박스 리스트의 높이를 max로 통일 (중심 y 고정, 상하 대칭 확장).
+        수동 layout(box() 직접 사용) 시 높이 균일화에 사용.
+        반환값: 통일된 높이.
+        사용:
+            d.equalize_heights([b1, b2, b3, b4, b5])
+        """
+        max_h = max(b.h for b in boxes)
+        for b in boxes:
+            if abs(b.h - max_h) > 0.001:
+                cy = b.cy
+                b.h = max_h
+                b.y = cy - max_h / 2
+                b.top = b.y + max_h
+                b.bot = b.y
+        return max_h
+
+    def equalize_widths(self, boxes: list) -> float:
+        """
+        박스 리스트의 너비를 max로 통일 (중심 x 고정, 좌우 대칭 확장).
+        반환값: 통일된 너비.
+        """
+        max_w = max(b.w for b in boxes)
+        for b in boxes:
+            if abs(b.w - max_w) > 0.001:
+                cx = b.cx
+                b.w = max_w
+                b.x = cx - max_w / 2
+                b.left = b.x
+                b.right = b.x + max_w
+        return max_w
 
     def fig_label(self, y=None):
         """FIG. N 라벨 (하단 중앙 자동 배치)."""

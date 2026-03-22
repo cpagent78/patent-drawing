@@ -1362,6 +1362,65 @@ class Drawing:
         encoded_side = f"{side}:{style}"
         self._cmds.append(('ref_callout', box, ref_num, encoded_side, offset, fs or FS_BODY))
 
+    def ref_callout_bus(self, bus_x, ref_num, side='right', fs=None):
+        """
+        버스선(수직 line)에 참조번호 callout 배치.
+        버스 위 연결점(박스 cy) 사이 가장 넓은 빈 공간을 자동 탐색.
+        빈 공간이 없으면 버스 상단/하단에 배치.
+
+        bus_x: 버스선 x 좌표
+        side: 'right'(기본) 또는 'left' — 참조번호 배치 방향
+        사용:
+            d.ref_callout_bus(BUS_X, '806')
+        """
+        self._cmds.append(('ref_callout_bus', bus_x, ref_num, side, fs or FS_BODY))
+
+    def _render_ref_callout_bus(self, ax, bus_x, ref_num, side, fs):
+        """버스선 빈 공간에 callout 자동 배치."""
+        import numpy as np
+
+        # 버스선 위의 모든 연결점(y좌표) 수집
+        bus_ys = []
+        for cmd in self._cmds:
+            if cmd[0] in ('route', 'bidir'):
+                pts = cmd[1]
+                for px, py in pts:
+                    if abs(px - bus_x) < 0.05:
+                        bus_ys.append(py)
+        bus_ys = sorted(set(bus_ys))
+
+        if len(bus_ys) < 2:
+            # 연결점 부족 → 버스선 중앙에 배치
+            mid_y = sum(bus_ys) / len(bus_ys) if bus_ys else 5.5
+        else:
+            # 가장 넓은 gap 찾기
+            best_gap = 0
+            best_mid = bus_ys[0]
+            for i in range(len(bus_ys) - 1):
+                gap = bus_ys[i + 1] - bus_ys[i]
+                if gap > best_gap:
+                    best_gap = gap
+                    best_mid = (bus_ys[i] + bus_ys[i + 1]) / 2
+            mid_y = best_mid
+
+        # 리더 라인 + 참조번호
+        LEADER_LEN = 0.30
+        if side == 'right':
+            # 버스에서 오른쪽으로 짧은 수평선
+            ax.plot([bus_x, bus_x + LEADER_LEN], [mid_y, mid_y],
+                    color=BOX_EDGE, lw=LW_BOX * 0.8,
+                    solid_capstyle='butt', zorder=Z_FIG_LABEL + 1)
+            ax.text(bus_x + LEADER_LEN + 0.05, mid_y, ref_num,
+                    ha='left', va='center',
+                    fontsize=fs, fontweight=FW, zorder=Z_FIG_LABEL + 2)
+        else:
+            ax.plot([bus_x - LEADER_LEN, bus_x], [mid_y, mid_y],
+                    color=BOX_EDGE, lw=LW_BOX * 0.8,
+                    solid_capstyle='butt', zorder=Z_FIG_LABEL + 1)
+            ax.text(bus_x - LEADER_LEN - 0.05, mid_y, ref_num,
+                    ha='right', va='center',
+                    fontsize=fs, fontweight=FW, zorder=Z_FIG_LABEL + 2)
+
     def brace(self, x1, y1, x2, y2, side='right', label="", fs=None):
         """
         중괄호(brace) — 그룹 범위 표시.
@@ -1589,6 +1648,9 @@ class Drawing:
             elif cmd[0] == 'ref_callout':
                 _, box, ref_num, side, offset, fs = cmd
                 self._render_ref_callout(ax, box, ref_num, side, offset, fs)
+            elif cmd[0] == 'ref_callout_bus':
+                _, bus_x, ref_num, side, fs = cmd
+                self._render_ref_callout_bus(ax, bus_x, ref_num, side, fs)
 
         # Pass 3: 박스 white fill
         for cmd in self._cmds:

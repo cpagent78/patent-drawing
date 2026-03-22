@@ -807,34 +807,37 @@ class Drawing:
                 int_top += 0.35  # 라벨 공간 확보
                 self.layer(int_left, int_bot, int_right, int_top, label=boundary_label)
 
-        # Step 5: 각 박스 ↔ 버스 수직 양방향 화살표
+        # Step 5: 버스 → 박스 단방향 화살표 (버스쪽은 선, 박스쪽에 화살촉)
+        # 시작점을 버스선 반대편으로 0.05" 연장 → 버스선과 시각적으로 확실히 연결
+        BUS_OVERSHOOT = 0.02
         for ri, row in enumerate(rows):
             for nd in row:
                 if nd.box_ref is None:
                     continue
                 b = nd.box_ref
-                if ri == 0:  # 상단 행: 박스 아래 ↔ 버스
-                    # 양방향 화살표: 버스 → 박스 하단
-                    self._cmds.append(('bidir', [(b.cx, bus_y), (b.cx, b.bot)]))
-                else:  # 하단 행: 버스 ↔ 박스 상단
-                    self._cmds.append(('bidir', [(b.cx, bus_y), (b.cx, b.top)]))
+                if ri == 0:  # 상단 행: 버스 → 박스 하단 (위로 향하는 화살촉)
+                    self._cmds.append(('route', [(b.cx, bus_y - BUS_OVERSHOOT), (b.cx, b.bot)],
+                                       '', None, None))
+                else:  # 하단 행: 버스 → 박스 상단 (아래로 향하는 화살촉)
+                    self._cmds.append(('route', [(b.cx, bus_y + BUS_OVERSHOOT), (b.cx, b.top)],
+                                       '', None, None))
 
-        # Step 6: 버스 → external 양방향 화살표
+        # Step 6: 버스 → external 단방향 화살표 (버스쪽은 선, external 박스쪽에 화살촉)
         for side, ext_nodes in external.items():
             for ext_nd in ext_nodes:
                 if ext_nd.box_ref is None:
                     continue
                 if side == 'right':
-                    # int boundary 우측 → external 좌측 (점선 통과 화살표)
-                    self._cmds.append(('bidir', [
-                        (int_right, bus_y),
+                    # 버스 → external 좌측 (점선 통과 화살표, 버스쪽 overshoot)
+                    self._cmds.append(('route', [
+                        (int_right - BUS_OVERSHOOT, bus_y),
                         ext_nd.box_ref.left_mid(),
-                    ]))
+                    ], '', None, None))
                 elif side == 'left':
-                    self._cmds.append(('bidir', [
+                    self._cmds.append(('route', [
+                        (int_left + BUS_OVERSHOOT, bus_y),
                         ext_nd.box_ref.right_mid(),
-                        (int_left, bus_y),
-                    ]))
+                    ], '', None, None))
 
         # Step 7: 페이지 boundary (라벨 없음 — internal에 이미 boundary_label)
         self.boundary(BND_X1, BND_Y1, BND_X2, BND_Y2)
@@ -1511,6 +1514,13 @@ class Drawing:
         EDGE_TOL = 0.15  # 허용 오차 (인치)
         box_rects = [(b.left, b.bot, b.right, b.top) for b in self._box_refs]
 
+        # 버스선(line) 구간 수집 — bus 패턴에서 화살표 출발점이 버스선 위에 있는 건 정상
+        line_segs = []
+        for cmd in self._cmds:
+            if cmd[0] == 'line':
+                _, lx1, ly1, lx2, ly2, _ = cmd
+                line_segs.append((lx1, ly1, lx2, ly2))
+
         def _near_box_edge(px, py):
             for (bx_l, bx_b, bx_r, bx_t) in box_rects:
                 on_left   = abs(px - bx_l) < EDGE_TOL and bx_b - EDGE_TOL <= py <= bx_t + EDGE_TOL
@@ -1521,16 +1531,27 @@ class Drawing:
                     return True
             return False
 
+        def _on_bus_line(px, py):
+            """버스선(수평/수직 라인) 위에 있는 점인지 확인 — bus 패턴 예외 처리."""
+            for (lx1, ly1, lx2, ly2) in line_segs:
+                if abs(ly1 - ly2) < 0.01:  # 수평선
+                    if abs(py - ly1) < EDGE_TOL and min(lx1, lx2) - EDGE_TOL <= px <= max(lx1, lx2) + EDGE_TOL:
+                        return True
+                elif abs(lx1 - lx2) < 0.01:  # 수직선
+                    if abs(px - lx1) < EDGE_TOL and min(ly1, ly2) - EDGE_TOL <= py <= max(ly1, ly2) + EDGE_TOL:
+                        return True
+            return False
+
         for cmd in self._cmds:
             if cmd[0] in ('route', 'bidir'):
                 pts = cmd[1]
                 if len(pts) >= 2:
                     src, dst = pts[0], pts[-1]
-                    if not _near_box_edge(src[0], src[1]):
+                    if not _near_box_edge(src[0], src[1]) and not _on_bus_line(src[0], src[1]):
                         issues.append(
                             f'Arrow src ({src[0]:.2f},{src[1]:.2f}) NOT on any box edge. '
                             f'Dangling tail.')
-                    if not _near_box_edge(dst[0], dst[1]):
+                    if not _near_box_edge(dst[0], dst[1]) and not _on_bus_line(dst[0], dst[1]):
                         issues.append(
                             f'Arrow dst ({dst[0]:.2f},{dst[1]:.2f}) NOT on any box edge. '
                             f'Dangling head.')

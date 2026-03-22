@@ -1773,10 +1773,8 @@ class Drawing:
         p0 = np.array(anc)
         p1 = p0 + np.array(dep_dir) * dep          # 출발: 변 수직 방향
         p3 = np.array([txt_x, txt_y])
-        # 도착 컨트롤: 텍스트에서 앵커 방향으로
-        arr_dir = p0 - p3
-        arr_len = max(np.linalg.norm(arr_dir), 1e-6)
-        p2 = p3 + arr_dir / arr_len * dep           # 도착: 텍스트→앵커 방향
+        # 도착 컨트롤: 텍스트에서 출발 방향(동일)으로 → S자 곡선 방지
+        p2 = p3 + np.array(dep_dir) * dep
 
         t_vals = np.linspace(0, 1, 40)
         bx = ((1-t_vals)**3 * p0[0] + 3*(1-t_vals)**2*t_vals * p1[0]

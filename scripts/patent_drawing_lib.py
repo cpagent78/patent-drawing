@@ -1208,6 +1208,41 @@ class Drawing:
         """화살촉 없는 단순 선분. 브래킷, 구분선, 버스 등에 사용."""
         self._cmds.append(('line', x1, y1, x2, y2, ls))
 
+    def cloud(self, cx, cy, w, h, text="", fs=None) -> BoxRef:
+        """
+        구름(Cloud) 도형. 원 여러 개를 겹쳐 구름 모양 생성.
+        텍스트는 중앙에 표시. BoxRef(cx-w/2, cy-h/2, w, h) 반환.
+        사용:
+            c = d.cloud(4.0, 5.5, 1.8, 1.2, '310\nCloud')
+        """
+        b = BoxRef(cx - w/2, cy - h/2, w, h)
+        self._box_refs.append(b)
+        self._cmds.append(('cloud', cx, cy, w, h, text, fs or FS_BODY, b))
+        return b
+
+    def iot_stack(self, x, y, w, h, text="", n=3, offset=0.07, fs=None) -> BoxRef:
+        """
+        IoT 디바이스 스택 — 사각형을 n개 비스듬히 겹쳐서 복수 디바이스 표현.
+        x, y: 앞면 박스 좌하단. offset: 뒤 박스 당 이동량(인치).
+        반환: 앞면 BoxRef.
+        사용:
+            s = d.iot_stack(1.0, 5.0, 1.2, 0.7, '314\nIoT', n=3)
+        """
+        b = BoxRef(x, y, w, h)
+        self._box_refs.append(b)
+        self._cmds.append(('iot_stack', x, y, w, h, text, n, offset, fs or FS_BODY, b))
+        return b
+
+    def brace(self, x1, y1, x2, y2, side='right', label="", fs=None):
+        """
+        중괄호(brace) — 그룹 범위 표시.
+        side: 'right'(우측에 브레이스), 'left', 'top', 'bottom'
+        (x1,y1)~(x2,y2): 감싸는 영역 범위.
+        사용:
+            d.brace(5.5, 6.0, 7.6, 9.5, side='right', label='306')
+        """
+        self._cmds.append(('brace', x1, y1, x2, y2, side, label, fs or FS_BODY))
+
     # ── 화살표 ────────────────────────────────────────────────────────────────
 
     def arrow_v(self, src_box: BoxRef, dst_box: BoxRef, label=""):
@@ -1328,6 +1363,20 @@ class Drawing:
                         color=BOX_EDGE, lw=LW_ARR, linestyle=ls,
                         solid_capstyle='round', zorder=Z_ARROW)
 
+        # Pass 2b: cloud / iot_stack / brace 렌더링
+        import numpy as np
+        from matplotlib.patches import Circle, Polygon, FancyArrowPatch
+        for cmd in self._cmds:
+            if cmd[0] == 'cloud':
+                _, cx, cy, w, h, text, fs, b = cmd
+                self._render_cloud(ax, cx, cy, w, h, text, fs)
+            elif cmd[0] == 'iot_stack':
+                _, x, y, w, h, text, n, offset, fs, b = cmd
+                self._render_iot_stack(ax, x, y, w, h, text, n, offset, fs)
+            elif cmd[0] == 'brace':
+                _, x1, y1, x2, y2, side, label, fs = cmd
+                self._render_brace(ax, x1, y1, x2, y2, side, label, fs)
+
         # Pass 3: 박스 white fill
         for cmd in self._cmds:
             if cmd[0] == 'box':
@@ -1418,6 +1467,106 @@ class Drawing:
             print(f"✓  {self.filename}")
 
         plt.close(self.fig)
+
+    # ── 신규 도형 렌더 ────────────────────────────────────────────────────────
+
+    def _render_cloud(self, ax, cx, cy, w, h, text, fs):
+        """구름 모양 — 원 7개를 겹쳐서 구름 윤곽 생성."""
+        import numpy as np
+        from matplotlib.patches import Circle
+        # 구름을 구성하는 원들 (cx,cy 기준 상대 좌표, 반지름)
+        bubbles = [
+            (0.00,  0.05, 0.30),   # 중앙 상단
+            (-0.22, 0.02, 0.24),   # 좌상
+            ( 0.22, 0.02, 0.24),   # 우상
+            (-0.38,-0.05, 0.20),   # 좌
+            ( 0.38,-0.05, 0.20),   # 우
+            (-0.15,-0.12, 0.22),   # 좌하
+            ( 0.15,-0.12, 0.22),   # 우하
+        ]
+        sx, sy = w / 1.0, h / 0.75   # 스케일
+        for bx, by, br in bubbles:
+            circ = Circle((cx + bx*sx, cy + by*sy), br * min(sx, sy)*0.85,
+                          facecolor=BOX_FILL, edgecolor=BOX_EDGE,
+                          linewidth=LW_BOX, zorder=Z_BOX_FILL)
+            ax.add_patch(circ)
+        # 텍스트
+        if text:
+            lines = text.split('\n')
+            fs_use = self._fit_font(text, w*0.7, h*0.5, fs)
+            ax.text(cx, cy - h*0.05, text,
+                    ha='center', va='center',
+                    fontsize=fs_use, fontweight=FW,
+                    multialignment='center', zorder=Z_BOX_TEXT)
+
+    def _render_iot_stack(self, ax, x, y, w, h, text, n, offset, fs):
+        """IoT 스택 — 사각형 n개를 뒤에서 앞으로 비스듬히 겹쳐서 그림."""
+        for i in range(n - 1, -1, -1):
+            dx = -i * offset
+            dy =  i * offset
+            zf = Z_BOX_FILL - i
+            ze = Z_BOX_EDGE - i
+            ax.add_patch(FancyBboxPatch(
+                (x + dx, y + dy), w, h, boxstyle="square,pad=0",
+                facecolor=BOX_FILL, edgecolor=BOX_EDGE,
+                linewidth=LW_BOX, zorder=zf))
+        # 앞면 텍스트
+        if text:
+            fs_use = self._fit_font(text, w - 0.18, h - 0.10, fs)
+            ax.text(x + w/2, y + h/2, text,
+                    ha='center', va='center',
+                    fontsize=fs_use, fontweight=FW,
+                    multialignment='center', zorder=Z_BOX_TEXT)
+
+    def _render_brace(self, ax, x1, y1, x2, y2, side, label, fs):
+        """중괄호 — matplotlib path로 그림."""
+        import numpy as np
+        from matplotlib.path import Path
+        import matplotlib.patches as mpatches
+
+        if side == 'right':
+            bx = x2 + 0.15   # 브레이스 x
+            mid_y = (y1 + y2) / 2
+            tip_x = bx + 0.20
+            # 상단 반 + 하단 반
+            verts = [
+                (bx, y2),
+                (bx, mid_y + 0.10),
+                (tip_x, mid_y),
+                (bx, mid_y - 0.10),
+                (bx, y1),
+            ]
+            codes = [Path.MOVETO, Path.CURVE3, Path.CURVE3, Path.CURVE3, Path.LINETO]
+            # 실제로는 두 곡선 분리
+            ax.plot([bx, bx], [y1, y2], color=BOX_EDGE, lw=LW_BOX, zorder=Z_ARROW)
+            ax.plot([bx, tip_x, bx], [(y1+y2)/2 + (y2-y1)*0.25,
+                                       mid_y,
+                                       (y1+y2)/2 - (y2-y1)*0.25],
+                    color=BOX_EDGE, lw=LW_BOX, zorder=Z_ARROW)
+            # 상단/하단 수평 돌출
+            for yy in [y1, y2]:
+                ax.plot([bx - 0.10, bx], [yy, yy],
+                        color=BOX_EDGE, lw=LW_BOX, zorder=Z_ARROW)
+            # 라벨
+            if label:
+                ax.text(tip_x + 0.08, mid_y, label,
+                        ha='left', va='center',
+                        fontsize=fs, fontweight=FW, zorder=Z_SEC_LABEL)
+        elif side == 'bottom':
+            by = y1 - 0.15
+            mid_x = (x1 + x2) / 2
+            tip_y = by - 0.20
+            ax.plot([x1, x2], [by, by], color=BOX_EDGE, lw=LW_BOX, zorder=Z_ARROW)
+            ax.plot([mid_x - (x2-x1)*0.25, mid_x, mid_x + (x2-x1)*0.25],
+                    [by, tip_y, by],
+                    color=BOX_EDGE, lw=LW_BOX, zorder=Z_ARROW)
+            for xx in [x1, x2]:
+                ax.plot([xx, xx], [by, by + 0.10],
+                        color=BOX_EDGE, lw=LW_BOX, zorder=Z_ARROW)
+            if label:
+                ax.text(mid_x, tip_y - 0.08, label,
+                        ha='center', va='top',
+                        fontsize=fs, fontweight=FW, zorder=Z_SEC_LABEL)
 
     # ── 내부 렌더 ─────────────────────────────────────────────────────────────
 

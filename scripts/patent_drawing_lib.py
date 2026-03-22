@@ -1303,12 +1303,13 @@ class Drawing:
         return b
 
     def ref_callout(self, box: BoxRef, ref_num: str, side='left',
-                    offset=0.15, fs=None, style='tilde'):
+                    offset=0.15, fs=None, style='tilde', strip_ref=False):
         """
         참조번호 외부 배치 callout. 두 가지 스타일 지원.
 
         style='tilde' (기본): '552~' 텍스트 방식 — 박스/플로우차트에 적합
         style='curve': 곡선 leader line — 원/구름/자유형 도형에 적합
+        strip_ref: True면 박스 텍스트에서 참조번호 줄을 자동 제거 (중복 방지)
 
         side: 'left'(기본), 'right', 'top', 'bottom',
               'top-left', 'top-right', 'bottom-left', 'bottom-right'
@@ -1317,7 +1318,21 @@ class Drawing:
         사용:
             d.ref_callout(b, '552', side='left')                  # 552~ 스타일
             d.ref_callout(b, '910', side='right', style='curve')  # 곡선 스타일
+            d.ref_callout(b, '830', side='left', style='curve', strip_ref=True)
         """
+        # strip_ref: 박스 내부 텍스트에서 참조번호 줄 제거
+        if strip_ref:
+            for cmd in self._cmds:
+                if cmd[0] == 'box' and cmd[1] is box:
+                    old_text = cmd[2]
+                    lines = old_text.split('\n')
+                    # 첫 줄이 참조번호면 제거
+                    if lines and lines[0].strip() == ref_num:
+                        new_text = '\n'.join(lines[1:])
+                        # cmd는 tuple이므로 리스트로 변환해서 수정
+                        idx = self._cmds.index(cmd)
+                        self._cmds[idx] = (cmd[0], cmd[1], new_text, cmd[3])
+                    break
         # side에 style 인코딩 (렌더러에 전달)
         encoded_side = f"{side}:{style}"
         self._cmds.append(('ref_callout', box, ref_num, encoded_side, offset, fs or FS_BODY))
@@ -1807,7 +1822,7 @@ class Drawing:
             p3 = np.array([txt_x, txt_y])
             # P1: 박스 변에서 법선 방향으로 진출
             # ctrl_len을 거리의 0.7배로 → 더 뚜렷한 곡선
-            ctrl_len = max(np.linalg.norm(p3 - anc) * 0.70, offset * 1.5)
+            ctrl_len = max(np.linalg.norm(p3 - anc) * 0.70, offset * 2.0, 0.35)
             p1 = anc + normal * ctrl_len
             # P2: 텍스트에서 법선 방향으로 (같은 방향 → S자 방지, 부드러운 진입)
             p2 = p3 - normal * ctrl_len * 0.4

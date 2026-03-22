@@ -1220,6 +1220,33 @@ class Drawing:
         self._cmds.append(('cloud', cx, cy, w, h, text, fs or FS_BODY, b))
         return b
 
+    def autocloud(self, cx, cy, text="", fs=None, pad_x=0.55, pad_y=0.45,
+                  max_w=None) -> BoxRef:
+        """
+        텍스트 크기를 실측 후 cloud w/h 자동 결정.
+        구름 내부 유효 공간은 실제 w/h보다 작으므로 pad를 넉넉하게 설정.
+        pad_x: 좌우 여백 합계 (기본 0.55" — 구름 곡선 여유)
+        pad_y: 상하 여백 합계 (기본 0.45")
+        max_w: 최대 구름 너비(인치). 초과 시 텍스트 자동 래핑.
+               기본값 None → 페이지 폭(6.5") 기준 자동 제한
+        사용:
+            c = d.autocloud(4.0, 5.5, '310\nDevice Owner')
+            c = d.autocloud(4.0, 5.5, '310\nDevice Owner', max_w=3.0)
+        """
+        fs = fs or FS_BODY
+        text = _normalize_node_text(text)
+        # max_w를 구름 내부 유효폭(w*0.65 기준)으로 환산
+        if max_w is None:
+            max_w = 7.35  # 페이지 기준 최대
+        inner_max = max_w * 0.65 - pad_x
+        # 텍스트가 내부 폭 초과 시 자동 래핑
+        text = _wrap_text_to_width(text, inner_max,
+                                   lambda t: self.measure_text(t, fs)[0])
+        tw, th = self.measure_text(text, fs)
+        w = (tw + pad_x) / 0.65
+        h = (th + pad_y) / 0.50
+        return self.cloud(cx, cy, w, h, text, fs)
+
     def iot_stack(self, x, y, w, h, text="", n=3, offset=0.07, fs=None) -> BoxRef:
         """
         IoT 디바이스 스택 — 사각형을 n개 비스듬히 겹쳐서 복수 디바이스 표현.
@@ -1246,25 +1273,37 @@ class Drawing:
     # ── 화살표 ────────────────────────────────────────────────────────────────
 
     def arrow_v(self, src_box: BoxRef, dst_box: BoxRef, label=""):
-        """수직 단방향 화살표 (src 하단 → dst 상단)."""
-        self._cmds.append(('route', [src_box.bot_mid(), dst_box.top_mid()],
-                           label, None, None))
+        """수직 단방향 화살표. dst 위치에 따라 위/아래 자동 선택 (관통 방지)."""
+        if dst_box.cy <= src_box.cy:
+            pts = [src_box.bot_mid(), dst_box.top_mid()]
+        else:
+            pts = [src_box.top_mid(), dst_box.bot_mid()]
+        self._cmds.append(('route', pts, label, None, None))
 
     def arrow_h(self, src_box: BoxRef, dst_box: BoxRef, label=""):
-        """수평 단방향 화살표 (src 우측 → dst 좌측)."""
-        self._cmds.append(('route', [src_box.right_mid(), dst_box.left_mid()],
-                           label, None, None))
+        """수평 단방향 화살표. dst 위치에 따라 좌/우 자동 선택 (관통 방지)."""
+        if dst_box.cx >= src_box.cx:
+            pts = [src_box.right_mid(), dst_box.left_mid()]
+        else:
+            pts = [src_box.left_mid(), dst_box.right_mid()]
+        self._cmds.append(('route', pts, label, None, None))
 
     def arrow_bidir(self, box_a: BoxRef, box_b: BoxRef, side='h'):
         """
         양방향 단일 선 (↔ 또는 ↕).
         side='h': 수평, side='v': 수직.
-        두 화살표 겹침 대신 사용 — 명확성 규칙 준수.
+        박스 상대 위치를 자동 감지하여 올바른 edge를 선택 (관통 방지).
         """
         if side == 'h':
-            pts = [box_a.right_mid(), box_b.left_mid()]
+            if box_b.cx >= box_a.cx:
+                pts = [box_a.right_mid(), box_b.left_mid()]
+            else:
+                pts = [box_a.left_mid(), box_b.right_mid()]
         else:
-            pts = [box_a.bot_mid(), box_b.top_mid()]
+            if box_b.cy <= box_a.cy:
+                pts = [box_a.bot_mid(), box_b.top_mid()]
+            else:
+                pts = [box_a.top_mid(), box_b.bot_mid()]
         self._cmds.append(('bidir', pts))
 
     def arrow_bidir_route(self, steps):
@@ -1279,14 +1318,23 @@ class Drawing:
 
     def arrow_diagonal(self, box_a: BoxRef, box_b: BoxRef, gap=0.08):
         """
-        두 박스 사이 직선 대각선 화살표.
-        각 박스의 경계 교차점에서 출발/도착 (정확한 rect_edge 계산).
-        원형/타원 배치 다이어그램에서 사용.
-        사용: d.arrow_diagonal(boxes[i], boxes[j])
+        두 박스 사이 직선 대각선 화살표 (단방향: a→b).
+        각 박스의 경계 교차점에서 출발/도착.
+        사용: d.arrow_diagonal(cloud, iot)
         """
         sx, sy = box_a.edge_toward(box_b.cx, box_b.cy, gap)
         ex, ey = box_b.edge_toward(box_a.cx, box_a.cy, gap)
         self._cmds.append(('route', [(sx, sy), (ex, ey)], '', None, None))
+
+    def arrow_diagonal_bidir(self, box_a: BoxRef, box_b: BoxRef, gap=0.08):
+        """
+        두 박스 사이 직선 대각선 양방향 화살표 (↔).
+        원형/방사형 다이어그램에서 사용.
+        사용: d.arrow_diagonal_bidir(cloud, iot)
+        """
+        sx, sy = box_a.edge_toward(box_b.cx, box_b.cy, gap)
+        ex, ey = box_b.edge_toward(box_a.cx, box_a.cy, gap)
+        self._cmds.append(('bidir', [(sx, sy), (ex, ey)]))
 
     def arrow_route(self, steps, label="", label_pos=1,
                     label_dx=0.18, label_ha='left', ls='-'):
@@ -1471,30 +1519,83 @@ class Drawing:
     # ── 신규 도형 렌더 ────────────────────────────────────────────────────────
 
     def _render_cloud(self, ax, cx, cy, w, h, text, fs):
-        """구름 모양 — 원 7개를 겹쳐서 구름 윤곽 생성."""
+        """구름 모양 — 타원 둘레에 원 N개 배치 후 바깥쪽 호만 그림.
+        타원이 콘텐츠를 감싸고, 원들이 타원 테두리를 구름 모양으로 표현."""
         import numpy as np
-        from matplotlib.patches import Circle
-        # 구름을 구성하는 원들 (cx,cy 기준 상대 좌표, 반지름)
-        bubbles = [
-            (0.00,  0.05, 0.30),   # 중앙 상단
-            (-0.22, 0.02, 0.24),   # 좌상
-            ( 0.22, 0.02, 0.24),   # 우상
-            (-0.38,-0.05, 0.20),   # 좌
-            ( 0.38,-0.05, 0.20),   # 우
-            (-0.15,-0.12, 0.22),   # 좌하
-            ( 0.15,-0.12, 0.22),   # 우하
-        ]
-        sx, sy = w / 1.0, h / 0.75   # 스케일
-        for bx, by, br in bubbles:
-            circ = Circle((cx + bx*sx, cy + by*sy), br * min(sx, sy)*0.85,
-                          facecolor=BOX_FILL, edgecolor=BOX_EDGE,
-                          linewidth=LW_BOX, zorder=Z_BOX_FILL)
-            ax.add_patch(circ)
-        # 텍스트
+        from matplotlib.patches import Circle, Ellipse
+
+        ea = w / 2
+        eb = h / 2
+        N_BUBBLES = 12
+        ellipse_perim = np.pi * (3*(ea+eb) - np.sqrt((3*ea+eb)*(ea+3*eb)))
+        bubble_r = ellipse_perim / N_BUBBLES * 0.58
+
+        # 타원 둘레를 호 길이 기준으로 N등분
+        angles_all = np.linspace(0, 2*np.pi, 2000, endpoint=False)
+        ds = np.sqrt((ea*np.sin(angles_all))**2 + (eb*np.cos(angles_all))**2)
+        cumlen = np.cumsum(ds) * (angles_all[1] - angles_all[0])
+        targets = np.linspace(0, cumlen[-1], N_BUBBLES, endpoint=False)
+        bubble_angles = np.interp(targets, cumlen, angles_all)
+
+        circles = [(cx + ea*np.cos(a), cy + eb*np.sin(a), bubble_r)
+                   for a in bubble_angles]
+
+        # Step 1: 흰색 fill
+        ax.add_patch(Ellipse((cx, cy), w, h,
+                             facecolor=BOX_FILL, edgecolor='none',
+                             linewidth=0, zorder=Z_BOX_FILL))
+        for bx, by, br in circles:
+            ax.add_patch(Circle((bx, by), br,
+                                facecolor=BOX_FILL, edgecolor='none',
+                                linewidth=0, zorder=Z_BOX_FILL))
+
+        # Step 2: 각 원의 교차점 계산 → 바깥쪽+타원 바깥 호만 그림
+        TWO_PI = 2 * np.pi
+        for i, (ocx, ocy, orad) in enumerate(circles):
+            cut_angles = []
+            for j, (ocx2, ocy2, orad2) in enumerate(circles):
+                if i == j:
+                    continue
+                dist = np.hypot(ocx2 - ocx, ocy2 - ocy)
+                if dist >= orad + orad2 or dist <= abs(orad - orad2) + 1e-9:
+                    continue
+                cos_a = np.clip((orad**2 + dist**2 - orad2**2) / (2*orad*dist), -1, 1)
+                half = np.arccos(cos_a)
+                base = np.arctan2(ocy2 - ocy, ocx2 - ocx)
+                cut_angles.append((base - half) % TWO_PI)
+                cut_angles.append((base + half) % TWO_PI)
+
+            if not cut_angles:
+                a_arr = np.linspace(0, TWO_PI, 120)
+                ax.plot(ocx + orad*np.cos(a_arr), ocy + orad*np.sin(a_arr),
+                        color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE)
+                continue
+
+            cut_angles = sorted(set(cut_angles))
+            cut_angles.append(cut_angles[0] + TWO_PI)
+
+            for k in range(len(cut_angles) - 1):
+                a0, a1 = cut_angles[k], cut_angles[k+1]
+                amid = (a0 + a1) / 2
+                mx = ocx + orad * np.cos(amid)
+                my = ocy + orad * np.sin(amid)
+                # 다른 원 안이면 skip
+                if any((mx-ocx2)**2+(my-ocy2)**2 < (orad2*0.999)**2
+                       for j,(ocx2,ocy2,orad2) in enumerate(circles) if j!=i):
+                    continue
+                # 타원 안이면 skip
+                if (mx-cx)**2/ea**2 + (my-cy)**2/eb**2 < 0.90**2:
+                    continue
+                n_pts = max(4, int((a1-a0)/TWO_PI*200))
+                a_arr = np.linspace(a0, a1, n_pts)
+                ax.plot(ocx + orad*np.cos(a_arr), ocy + orad*np.sin(a_arr),
+                        color=BOX_EDGE, lw=LW_BOX,
+                        solid_capstyle='butt', zorder=Z_BOX_EDGE)
+
+        # Step 3: 텍스트
         if text:
-            lines = text.split('\n')
-            fs_use = self._fit_font(text, w*0.7, h*0.5, fs)
-            ax.text(cx, cy - h*0.05, text,
+            fs_use = self._fit_font(text, w * 0.65, h * 0.50, fs)
+            ax.text(cx, cy, text,
                     ha='center', va='center',
                     fontsize=fs_use, fontweight=FW,
                     multialignment='center', zorder=Z_BOX_TEXT)

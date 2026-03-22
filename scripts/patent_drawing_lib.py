@@ -1302,6 +1302,24 @@ class Drawing:
         self._cmds.append(('iot_stack', x, y, w, h, text, n, offset, fs or FS_BODY, b))
         return b
 
+    def ref_callout(self, box: BoxRef, ref_num: str, side='top-left',
+                    offset=0.30, fs=None):
+        """
+        참조번호를 박스 밖에 배치하고 leader line으로 연결 (callout 스타일).
+        박스 내부 공간이 부족하거나 외부 배치가 필요할 때 사용.
+
+        side: 참조번호 위치
+          'top-left', 'top-right', 'top', 'bottom-left', 'bottom-right',
+          'bottom', 'left', 'right'
+        offset: 박스 edge에서 참조번호까지 거리 (인치)
+        fs: 폰트 크기
+
+        사용:
+            b = d.iot_stack(...)
+            d.ref_callout(b, '314', side='top-left')
+        """
+        self._cmds.append(('ref_callout', box, ref_num, side, offset, fs or FS_BODY))
+
     def brace(self, x1, y1, x2, y2, side='right', label="", fs=None):
         """
         중괄호(brace) — 그룹 범위 표시.
@@ -1473,7 +1491,7 @@ class Drawing:
                         color=BOX_EDGE, lw=LW_ARR, linestyle=ls,
                         solid_capstyle='round', zorder=Z_ARROW)
 
-        # Pass 2b: cloud / iot_stack / brace 렌더링
+        # Pass 2b: cloud / iot_stack / brace / ref_callout 렌더링
         import numpy as np
         from matplotlib.patches import Circle, Polygon, FancyArrowPatch
         for cmd in self._cmds:
@@ -1486,6 +1504,9 @@ class Drawing:
             elif cmd[0] == 'brace':
                 _, x1, y1, x2, y2, side, label, fs = cmd
                 self._render_brace(ax, x1, y1, x2, y2, side, label, fs)
+            elif cmd[0] == 'ref_callout':
+                _, box, ref_num, side, offset, fs = cmd
+                self._render_ref_callout(ax, box, ref_num, side, offset, fs)
 
         # Pass 3: 박스 white fill
         for cmd in self._cmds:
@@ -1680,6 +1701,77 @@ class Drawing:
                     ha='center', va='center',
                     fontsize=fs_use, fontweight=FW,
                     multialignment='center', zorder=Z_BOX_TEXT)
+
+    def _render_ref_callout(self, ax, box, ref_num, side, offset, fs):
+        """참조번호를 박스 바깥에 배치하고 꺾인 leader line으로 연결."""
+        # side별 박스 위 연결점 (anchor) + 참조번호 위치 계산
+        elbow = 0.15  # leader line 꺾임 길이
+
+        if side == 'top-left':
+            ax_x, ax_y = box.left, box.top          # 박스 좌상단 모서리
+            rx = ax_x - offset
+            ry = ax_y + offset
+            # leader: 참조번호 → 오른쪽으로 → 박스 모서리로
+            lx1, ly1 = rx + (len(ref_num)*fs*0.6/72), ry
+            lx2, ly2 = ax_x, ax_y
+        elif side == 'top-right':
+            ax_x, ax_y = box.right, box.top
+            rx = ax_x + offset
+            ry = ax_y + offset
+            lx1, ly1 = rx - (len(ref_num)*fs*0.6/72), ry
+            lx2, ly2 = ax_x, ax_y
+        elif side == 'top':
+            ax_x, ax_y = box.cx, box.top
+            rx = ax_x
+            ry = ax_y + offset
+            lx1, ly1 = rx, ry - elbow
+            lx2, ly2 = ax_x, ax_y
+        elif side == 'bottom-left':
+            ax_x, ax_y = box.left, box.bot
+            rx = ax_x - offset
+            ry = ax_y - offset
+            lx1, ly1 = rx + (len(ref_num)*fs*0.6/72), ry
+            lx2, ly2 = ax_x, ax_y
+        elif side == 'bottom-right':
+            ax_x, ax_y = box.right, box.bot
+            rx = ax_x + offset
+            ry = ax_y - offset
+            lx1, ly1 = rx - (len(ref_num)*fs*0.6/72), ry
+            lx2, ly2 = ax_x, ax_y
+        elif side == 'bottom':
+            ax_x, ax_y = box.cx, box.bot
+            rx = ax_x
+            ry = ax_y - offset
+            lx1, ly1 = rx, ry + elbow
+            lx2, ly2 = ax_x, ax_y
+        elif side == 'left':
+            ax_x, ax_y = box.left, box.cy
+            rx = ax_x - offset
+            ry = ax_y
+            lx1, ly1 = rx + elbow, ry
+            lx2, ly2 = ax_x, ax_y
+        elif side == 'right':
+            ax_x, ax_y = box.right, box.cy
+            rx = ax_x + offset
+            ry = ax_y
+            lx1, ly1 = rx - elbow, ry
+            lx2, ly2 = ax_x, ax_y
+        else:
+            ax_x, ax_y = box.left, box.top
+            rx, ry = ax_x - offset, ax_y + offset
+            lx1, ly1 = rx, ry
+            lx2, ly2 = ax_x, ax_y
+
+        # leader line: 참조번호 근처점 → 박스 모서리 (꺾인 선)
+        ax.plot([lx1, lx2], [ly1, ly2],
+                color=BOX_EDGE, lw=LW_BOX * 0.8,
+                solid_capstyle='round', zorder=Z_ARROW)
+
+        # 참조번호 텍스트
+        ha = 'right' if 'right' in side else ('center' if side in ('top','bottom') else 'left')
+        ax.text(rx, ry, ref_num,
+                ha=ha, va='center',
+                fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
 
     def _render_brace(self, ax, x1, y1, x2, y2, side, label, fs):
         """중괄호 — matplotlib path로 그림."""

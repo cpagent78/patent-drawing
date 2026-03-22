@@ -1709,70 +1709,80 @@ class Drawing:
         """
         import numpy as np
 
-        # side별 anchor (변의 중간점) + 텍스트 위치
+        # side별 anchor + 출발 방향 단위벡터 (변에 수직) + 텍스트 위치
+        # top-left/top-right: left/right 변에서 출발 (모서리 혼동 방지)
+        dep = offset * 0.6   # 출발 방향 컨트롤 거리
+
         if side == 'top-left':
-            anc = (box.left + box.w * 0.25, box.top)   # 상단 변 좌측 1/4
+            anc = (box.left, box.top - box.h * 0.25)   # 좌측 변 상단 1/4
+            dep_dir = (-1, 0)                           # 왼쪽으로 출발
             txt_x = box.left - offset
-            txt_y = box.top + offset
-            ha, va = 'right', 'bottom'
+            txt_y = box.top + offset * 0.5
+            ha, va = 'right', 'center'
         elif side == 'top-right':
-            anc = (box.left + box.w * 0.75, box.top)   # 상단 변 우측 3/4
+            anc = (box.right, box.top - box.h * 0.25)  # 우측 변 상단 1/4
+            dep_dir = (1, 0)                            # 오른쪽으로 출발
             txt_x = box.right + offset
-            txt_y = box.top + offset
-            ha, va = 'left', 'bottom'
+            txt_y = box.top + offset * 0.5
+            ha, va = 'left', 'center'
         elif side == 'top':
             anc = (box.cx, box.top)                     # 상단 변 중앙
+            dep_dir = (0, 1)                            # 위로 출발
             txt_x = box.cx
             txt_y = box.top + offset
             ha, va = 'center', 'bottom'
         elif side == 'bottom-left':
             anc = (box.left + box.w * 0.25, box.bot)   # 하단 변 좌측 1/4
-            txt_x = box.left - offset
+            dep_dir = (0, -1)                           # 아래로 출발
+            txt_x = box.left - offset * 0.5
             txt_y = box.bot - offset
             ha, va = 'right', 'top'
         elif side == 'bottom-right':
             anc = (box.left + box.w * 0.75, box.bot)   # 하단 변 우측 3/4
-            txt_x = box.right + offset
+            dep_dir = (0, -1)                           # 아래로 출발
+            txt_x = box.right + offset * 0.5
             txt_y = box.bot - offset
             ha, va = 'left', 'top'
         elif side == 'bottom':
             anc = (box.cx, box.bot)                     # 하단 변 중앙
+            dep_dir = (0, -1)                           # 아래로 출발
             txt_x = box.cx
             txt_y = box.bot - offset
             ha, va = 'center', 'top'
         elif side == 'left':
             anc = (box.left, box.cy)                    # 좌측 변 중앙
+            dep_dir = (-1, 0)                           # 왼쪽으로 출발
             txt_x = box.left - offset
             txt_y = box.cy
             ha, va = 'right', 'center'
         elif side == 'right':
             anc = (box.right, box.cy)                   # 우측 변 중앙
+            dep_dir = (1, 0)                            # 오른쪽으로 출발
             txt_x = box.right + offset
             txt_y = box.cy
             ha, va = 'left', 'center'
         else:
-            anc = (box.left + box.w * 0.25, box.top)
+            anc = (box.left, box.top - box.h * 0.25)
+            dep_dir = (-1, 0)
             txt_x = box.left - offset
-            txt_y = box.top + offset
-            ha, va = 'right', 'bottom'
+            txt_y = box.top + offset * 0.5
+            ha, va = 'right', 'center'
 
-        # 곡선 leader line — 2차 베지에 (anchor → control → txt)
-        # control point: anchor와 txt의 중간에서 수직 방향으로 살짝 벗어남
-        cx_ctrl = (anc[0] + txt_x) / 2
-        cy_ctrl = (anc[1] + txt_y) / 2
-        # 선분에 수직 방향으로 bow 추가
-        dx, dy = txt_x - anc[0], txt_y - anc[1]
-        length = max(np.hypot(dx, dy), 1e-6)
-        # 수직 단위벡터 (bow 방향)
-        perp_x, perp_y = -dy / length, dx / length
-        bow = min(offset * 0.4, 0.12)   # 최대 0.12" 곡률
-        cx_ctrl += perp_x * bow
-        cy_ctrl += perp_y * bow
+        # 3차 베지에 — 변에서 수직으로 출발 후 텍스트로 자연스럽게 연결
+        # P0=anchor, P1=출발 컨트롤, P2=도착 컨트롤, P3=텍스트
+        p0 = np.array(anc)
+        p1 = p0 + np.array(dep_dir) * dep          # 출발: 변 수직 방향
+        p3 = np.array([txt_x, txt_y])
+        # 도착 컨트롤: 텍스트에서 앵커 방향으로
+        arr_dir = p0 - p3
+        arr_len = max(np.linalg.norm(arr_dir), 1e-6)
+        p2 = p3 + arr_dir / arr_len * dep           # 도착: 텍스트→앵커 방향
 
-        # 2차 베지에 점 계산
-        t_vals = np.linspace(0, 1, 30)
-        bx = (1-t_vals)**2 * anc[0] + 2*(1-t_vals)*t_vals * cx_ctrl + t_vals**2 * txt_x
-        by = (1-t_vals)**2 * anc[1] + 2*(1-t_vals)*t_vals * cy_ctrl + t_vals**2 * txt_y
+        t_vals = np.linspace(0, 1, 40)
+        bx = ((1-t_vals)**3 * p0[0] + 3*(1-t_vals)**2*t_vals * p1[0]
+              + 3*(1-t_vals)*t_vals**2 * p2[0] + t_vals**3 * p3[0])
+        by = ((1-t_vals)**3 * p0[1] + 3*(1-t_vals)**2*t_vals * p1[1]
+              + 3*(1-t_vals)*t_vals**2 * p2[1] + t_vals**3 * p3[1])
 
         ax.plot(bx, by, color=BOX_EDGE, lw=LW_BOX * 0.8,
                 solid_capstyle='round', zorder=Z_ARROW)

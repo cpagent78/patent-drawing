@@ -1902,14 +1902,17 @@ class Drawing:
                 wave_len = abs(wave_end_x - wave_start_x)
                 n_pts = 30
                 wx = np.linspace(wave_start_x, wave_end_x, n_pts)
-                if wave_len < 0.20:
-                    # 짧은 거리: 단순 S자 곡선 (bezier느낌)
-                    wave_amp = 0.025
+                # 진폭: 거리에 비례 (짧으면 거의 직선, 길면 물결)
+                wave_amp = min(wave_len * 0.15, 0.03)  # 최대 0.03"
+                if wave_len < 0.15:
+                    # 매우 짧은: 직선에 가까운 미세 곡선
                     wy = anc_y + wave_amp * np.sin(np.pi * np.linspace(0, 1, n_pts))
+                elif wave_len < 0.25:
+                    # 짧은: S자 곡선 1사이클
+                    wy = anc_y + wave_amp * np.sin(2 * np.pi * np.linspace(0, 1, n_pts))
                 else:
-                    # 긴 거리: sine wave
-                    wave_amp = 0.03
-                    n_cycles = max(2, int(wave_len / 0.08))
+                    # 긴: sine wave 다중 사이클
+                    n_cycles = max(2, int(wave_len / 0.10))
                     wy = anc_y + wave_amp * np.sin(n_cycles * 2 * np.pi * np.linspace(0, 1, n_pts))
                 ax.plot(wx, wy, color=BOX_EDGE, lw=LW_BOX * 0.7,
                         solid_capstyle='round', zorder=Z_FIG_LABEL + 1)
@@ -2553,6 +2556,35 @@ class Drawing:
                     f'Space usage {usage*100:.0f}%: boundary height {bnd_h:.1f}" but '
                     f'content height {content_h:.1f}". Consider reducing boundary or '
                     f'increasing content spacing for better space utilization.')
+
+        # 12b. line-line 접합 검증: line 끝점이 다른 line에 닿는지
+        LINE_JOIN_TOL = 0.03
+        for i_cmd, cmd1 in enumerate(self._cmds):
+            if cmd1[0] == 'line':
+                _, lx1, ly1, lx2, ly2, ls1 = cmd1
+                # 이 line의 양 끝점이 다른 line 위에 있는지 확인
+                for pt_x, pt_y, pt_name in [(lx1, ly1, 'start'), (lx2, ly2, 'end')]:
+                    on_any = False
+                    # 박스 edge에 있으면 OK
+                    if _near_box_edge(pt_x, pt_y):
+                        on_any = True
+                    # 다른 line 위에 있으면 OK
+                    for j_cmd, cmd2 in enumerate(self._cmds):
+                        if j_cmd == i_cmd or cmd2[0] != 'line':
+                            continue
+                        _, ox1, oy1, ox2, oy2, _ = cmd2
+                        # 수평선
+                        if abs(oy1 - oy2) < 0.01:
+                            if abs(pt_y - oy1) < LINE_JOIN_TOL and min(ox1,ox2)-LINE_JOIN_TOL <= pt_x <= max(ox1,ox2)+LINE_JOIN_TOL:
+                                on_any = True; break
+                        # 수직선
+                        elif abs(ox1 - ox2) < 0.01:
+                            if abs(pt_x - ox1) < LINE_JOIN_TOL and min(oy1,oy2)-LINE_JOIN_TOL <= pt_y <= max(oy1,oy2)+LINE_JOIN_TOL:
+                                on_any = True; break
+                    if not on_any and not _on_bus_line(pt_x, pt_y):
+                        issues.append(
+                            f'Line {pt_name} ({pt_x:.2f},{pt_y:.2f}) not connected to any box or line. '
+                            f'Ensure leader lines attach to target elements.')
 
         # 13. 도형 간 겹침 감지 (box-box, box-cloud overlap)
         for i, b1 in enumerate(self._box_refs):

@@ -1303,21 +1303,24 @@ class Drawing:
         return b
 
     def ref_callout(self, box: BoxRef, ref_num: str, side='left',
-                    offset=0.15, fs=None):
+                    offset=0.15, fs=None, style='tilde'):
         """
-        참조번호를 박스 바깥에 '552~' 스타일로 배치 (USPTO 표준).
-        물결표(~)가 박스 변에 닿는 방식 — 곡선 직접 그리기 없음.
+        참조번호 외부 배치 callout. 두 가지 스타일 지원.
+
+        style='tilde' (기본): '552~' 텍스트 방식 — 박스/플로우차트에 적합
+        style='curve': 곡선 leader line — 원/구름/자유형 도형에 적합
 
         side: 'left'(기본), 'right', 'top', 'bottom',
               'top-left', 'top-right', 'bottom-left', 'bottom-right'
-        offset: 박스 변에서 ~ 끝까지 간격 (기본 0.15")
-        fs: 폰트 크기
+        offset: 박스 변에서 참조번호까지 거리 (기본 0.15")
 
         사용:
-            b = d.box(...)
-            d.ref_callout(b, '552', side='left')   → '552~' 가 박스 왼쪽에 표시
+            d.ref_callout(b, '552', side='left')                  # 552~ 스타일
+            d.ref_callout(b, '910', side='right', style='curve')  # 곡선 스타일
         """
-        self._cmds.append(('ref_callout', box, ref_num, side, offset, fs or FS_BODY))
+        # side에 style 인코딩 (렌더러에 전달)
+        encoded_side = f"{side}:{style}"
+        self._cmds.append(('ref_callout', box, ref_num, encoded_side, offset, fs or FS_BODY))
 
     def brace(self, x1, y1, x2, y2, side='right', label="", fs=None):
         """
@@ -1702,33 +1705,98 @@ class Drawing:
                     multialignment='center', zorder=Z_BOX_TEXT)
 
     def _render_ref_callout(self, ax, box, ref_num, side, offset, fs):
-        """USPTO 표준 '552~' 스타일 callout.
-        물결표(~)가 박스 변에 닿고 번호는 그 옆에 배치. 곡선 없음."""
+        """USPTO ref callout.
+        style은 ref_callout() 호출 시 ref_num 앞뒤에 ~ 붙이거나 curve로 결정.
+        실제 style 파라미터는 ref_callout cmd tuple에 포함.
+        """
+        import numpy as np
+
         TILDE = '~'
 
-        if side in ('left', 'top-left', 'bottom-left'):
-            anc_y = box.cy if side == 'left' else (box.top if side == 'top-left' else box.bot)
-            label = ref_num + TILDE
-            t_obj = ax.text(box.left - offset, anc_y, label,
-                            ha='right', va='center',
-                            fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
-        elif side in ('right', 'top-right', 'bottom-right'):
-            anc_y = box.cy if side == 'right' else (box.top if side == 'top-right' else box.bot)
-            label = TILDE + ref_num
-            t_obj = ax.text(box.right + offset, anc_y, label,
-                            ha='left', va='center',
-                            fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
-        elif side == 'top':
-            label = ref_num + TILDE
-            t_obj = ax.text(box.left - offset, box.top, label,
-                            ha='right', va='center',
-                            fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
-        else:  # bottom
-            label = ref_num + TILDE
-            t_obj = ax.text(box.left - offset, box.bot, label,
-                            ha='right', va='center',
+        # cmd tuple: ('ref_callout', box, ref_num, side, offset, fs, style)
+        # style은 _cmds append 시 함께 저장 필요 → 이미 저장된 경우 처리
+        # (이 메서드는 style을 직접 받지 않으므로 side에 인코딩)
+        # side 형식: 'left', 'left:curve', 'right:tilde' 등
+        parts = side.split(':')
+        base_side = parts[0]
+        style = parts[1] if len(parts) > 1 else 'tilde'
+
+        # ── Tilde 스타일 ──────────────────────────────────────────────────────
+        if style == 'tilde':
+            if base_side in ('left', 'top-left', 'bottom-left'):
+                anc_y = box.cy if base_side == 'left' else (box.top if base_side == 'top-left' else box.bot)
+                label = ref_num + TILDE
+                t_obj = ax.text(box.left - offset, anc_y, label,
+                                ha='right', va='center',
+                                fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
+            elif base_side in ('right', 'top-right', 'bottom-right'):
+                anc_y = box.cy if base_side == 'right' else (box.top if base_side == 'top-right' else box.bot)
+                label = TILDE + ref_num
+                t_obj = ax.text(box.right + offset, anc_y, label,
+                                ha='left', va='center',
+                                fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
+            elif base_side == 'top':
+                label = ref_num + TILDE
+                t_obj = ax.text(box.left - offset, box.top, label,
+                                ha='right', va='center',
+                                fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
+            else:  # bottom
+                label = ref_num + TILDE
+                t_obj = ax.text(box.left - offset, box.bot, label,
+                                ha='right', va='center',
+                                fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
+
+        # ── Curve 스타일 ──────────────────────────────────────────────────────
+        else:
+            # 박스 anchor (변 중간점) + 법선 방향
+            if base_side in ('left', 'top-left', 'bottom-left'):
+                anc_y = box.cy if base_side == 'left' else (box.top - box.h*0.2 if base_side == 'top-left' else box.bot + box.h*0.2)
+                anc = np.array([box.left, anc_y])
+                normal = np.array([-1.0, 0.0])   # 왼쪽 법선
+                txt_x = box.left - offset * 2.0
+                txt_y = anc_y + (offset if 'top' in base_side else (-offset if 'bottom' in base_side else 0))
+                ha, va = 'right', 'center'
+            elif base_side in ('right', 'top-right', 'bottom-right'):
+                anc_y = box.cy if base_side == 'right' else (box.top - box.h*0.2 if base_side == 'top-right' else box.bot + box.h*0.2)
+                anc = np.array([box.right, anc_y])
+                normal = np.array([1.0, 0.0])    # 오른쪽 법선
+                txt_x = box.right + offset * 2.0
+                txt_y = anc_y + (offset if 'top' in base_side else (-offset if 'bottom' in base_side else 0))
+                ha, va = 'left', 'center'
+            elif base_side == 'top':
+                anc = np.array([box.cx, box.top])
+                normal = np.array([0.0, 1.0])
+                txt_x = box.cx + offset
+                txt_y = box.top + offset * 2.0
+                ha, va = 'left', 'bottom'
+            else:  # bottom
+                anc = np.array([box.cx, box.bot])
+                normal = np.array([0.0, -1.0])
+                txt_x = box.cx + offset
+                txt_y = box.bot - offset * 2.0
+                ha, va = 'left', 'top'
+
+            p3 = np.array([txt_x, txt_y])
+            # P1: 박스 변에서 법선 방향으로 진출
+            ctrl_len = max(np.linalg.norm(p3 - anc) * 0.4, offset)
+            p1 = anc + normal * ctrl_len
+            # P2: 텍스트에서 법선 역방향으로 진입 (S자 방지)
+            p2 = p3 - normal * ctrl_len * 0.5
+
+            t_vals = np.linspace(0, 1, 40)
+            bx = ((1-t_vals)**3*anc[0] + 3*(1-t_vals)**2*t_vals*p1[0]
+                  + 3*(1-t_vals)*t_vals**2*p2[0] + t_vals**3*p3[0])
+            by = ((1-t_vals)**3*anc[1] + 3*(1-t_vals)**2*t_vals*p1[1]
+                  + 3*(1-t_vals)*t_vals**2*p2[1] + t_vals**3*p3[1])
+            ax.plot(bx, by, color=BOX_EDGE, lw=LW_BOX*0.8,
+                    solid_capstyle='round', zorder=Z_ARROW)
+
+            label = ref_num
+            t_obj = ax.text(txt_x, txt_y, label,
+                            ha=ha, va=va,
                             fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
 
+        # boundary 검증용 실측 등록
         try:
             self.fig.canvas.draw()
             renderer = self.fig.canvas.get_renderer()
@@ -1739,7 +1807,7 @@ class Drawing:
             self._label_extents.append({
                 'x0': min(pt0[0], pt1[0]), 'x1': max(pt0[0], pt1[0]),
                 'y0': min(pt0[1], pt1[1]), 'y1': max(pt0[1], pt1[1]),
-                'text': label,
+                'text': ref_num,
             })
         except Exception:
             pass

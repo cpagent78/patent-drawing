@@ -125,6 +125,37 @@ def _normalize_node_text(text: str) -> str:
     return text
 
 
+def _wrap_text_to_width(text: str, max_w: float, measure_fn) -> str:
+    """
+    텍스트가 max_w를 초과할 경우 균등 2분할 래핑.
+    참조번호(첫 줄)는 건드리지 않고 본문만 래핑.
+    measure_fn: (text) → width_in
+    """
+    parts = text.split('\n', 1)
+    if len(parts) != 2:
+        return text
+    ref, body = parts
+    # 이미 너비 안에 들어오면 그대로
+    if measure_fn(body) <= max_w:
+        return text
+    # 단어 기준 균등 2분할
+    words = body.split()
+    if len(words) <= 1:
+        return text
+    best_split = 1
+    best_diff = float('inf')
+    for i in range(1, len(words)):
+        left  = ' '.join(words[:i])
+        right = ' '.join(words[i:])
+        diff = abs(measure_fn(left) - measure_fn(right))
+        if diff < best_diff:
+            best_diff = diff
+            best_split = i
+    left  = ' '.join(words[:best_split])
+    right = ' '.join(words[best_split:])
+    return ref + '\n' + left + '\n' + right
+
+
 # ── NodeDef ───────────────────────────────────────────────────────────────────
 class NodeDef:
     """
@@ -724,6 +755,26 @@ class Drawing:
 
             total_w = max_row_w + ext_right_w + ext_left_w
 
+        # Step 2b: 박스 너비 최종 확정 후 — 오버플로우 시 강제 래핑
+        # 텍스트가 (박스너비 - 최소패딩)을 초과하면 본문을 균등 2분할
+        MIN_PAD_H = 0.18
+        for nd in all_nodes:
+            body_max_w = nd._w - MIN_PAD_H
+            nd.text = _wrap_text_to_width(
+                nd.text, body_max_w,
+                lambda t, _nd=nd: self.measure_text(t, _nd.fs)[0]
+            )
+            # 래핑 후 높이 재측정 및 확장
+            _, th_new = self.measure_text(nd.text, nd.fs)
+            nd._h = max(nd._h, th_new + (nd.pad_y if nd.pad_y else pad_y))
+
+        # 래핑 후 행 내 높이 재통일
+        for row in rows:
+            if row:
+                max_h = max(nd._h for nd in row)
+                for nd in row:
+                    nd._h = max_h
+
         # 버스 y 좌표 (중앙)
         bus_y = content_cy
 
@@ -1078,9 +1129,9 @@ class Drawing:
         """
         박스 추가. 텍스트 폰트 자동 축소.
         text 형식: "102\\nCPU" (파이프 문자 금지)
-        참조번호 뒤 불필요한 \\n은 자동으로 스페이스로 치환됨.
+        주의: _normalize_node_text는 node()/autobox() 진입점에서만 적용.
+              box()는 이미 정규화/래핑된 텍스트를 그대로 받음.
         """
-        text = _normalize_node_text(text)
         b = BoxRef(x, y, w, h)
         self._box_refs.append(b)
         self._cmds.append(('box', b, text, fs))

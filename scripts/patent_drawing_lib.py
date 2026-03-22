@@ -1750,38 +1750,40 @@ class Drawing:
         else:
             # 박스 anchor (변 중간점) + 법선 방향
             if base_side in ('left', 'top-left', 'bottom-left'):
-                anc_y = box.cy if base_side == 'left' else (box.top - box.h*0.2 if base_side == 'top-left' else box.bot + box.h*0.2)
+                # 앵커: 상단 1/4 지점 → 짧고 자연스러운 곡선
+                anc_y = box.top - box.h * 0.25
                 anc = np.array([box.left, anc_y])
-                normal = np.array([-1.0, 0.0])   # 왼쪽 법선
-                txt_x = box.left - offset * 2.0
-                txt_y = anc_y + (offset if 'top' in base_side else (-offset if 'bottom' in base_side else 0))
-                ha, va = 'right', 'center'
+                normal = np.array([-1.0, 0.0])
+                txt_x = box.left - offset * 1.5
+                txt_y = anc_y + offset * 1.4
+                ha, va = 'right', 'bottom'
             elif base_side in ('right', 'top-right', 'bottom-right'):
-                anc_y = box.cy if base_side == 'right' else (box.top - box.h*0.2 if base_side == 'top-right' else box.bot + box.h*0.2)
+                anc_y = box.top - box.h * 0.25
                 anc = np.array([box.right, anc_y])
-                normal = np.array([1.0, 0.0])    # 오른쪽 법선
-                txt_x = box.right + offset * 2.0
-                txt_y = anc_y + (offset if 'top' in base_side else (-offset if 'bottom' in base_side else 0))
-                ha, va = 'left', 'center'
-            elif base_side == 'top':
-                anc = np.array([box.cx, box.top])
-                normal = np.array([0.0, 1.0])
-                txt_x = box.cx + offset
-                txt_y = box.top + offset * 2.0
+                normal = np.array([1.0, 0.0])
+                txt_x = box.right + offset * 1.5
+                txt_y = anc_y + offset * 1.4
                 ha, va = 'left', 'bottom'
+            elif base_side == 'top':
+                anc = np.array([box.left + box.w * 0.28, box.top])
+                normal = np.array([0.0, 1.0])
+                txt_x = box.left + box.w * 0.28 - offset * 0.3
+                txt_y = box.top + offset * 2.2
+                ha, va = 'right', 'bottom'
             else:  # bottom
-                anc = np.array([box.cx, box.bot])
+                anc = np.array([box.left + box.w * 0.28, box.bot])
                 normal = np.array([0.0, -1.0])
-                txt_x = box.cx + offset
-                txt_y = box.bot - offset * 2.0
-                ha, va = 'left', 'top'
+                txt_x = box.left + box.w * 0.28 - offset * 0.3
+                txt_y = box.bot - offset * 2.2
+                ha, va = 'right', 'top'
 
             p3 = np.array([txt_x, txt_y])
             # P1: 박스 변에서 법선 방향으로 진출
-            ctrl_len = max(np.linalg.norm(p3 - anc) * 0.4, offset)
+            # ctrl_len을 거리의 0.7배로 → 더 뚜렷한 곡선
+            ctrl_len = max(np.linalg.norm(p3 - anc) * 0.70, offset * 1.5)
             p1 = anc + normal * ctrl_len
-            # P2: 텍스트에서 법선 역방향으로 진입 (S자 방지)
-            p2 = p3 - normal * ctrl_len * 0.5
+            # P2: 텍스트에서 법선 방향으로 (같은 방향 → S자 방지, 부드러운 진입)
+            p2 = p3 - normal * ctrl_len * 0.4
 
             t_vals = np.linspace(0, 1, 40)
             bx = ((1-t_vals)**3*anc[0] + 3*(1-t_vals)**2*t_vals*p1[0]

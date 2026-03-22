@@ -236,3 +236,81 @@ Right channel:  x > content_right
 | 화살표 라벨이 인접 박스 텍스트와 겹침 | 좌측 채널 수직 구간에 라벨 배치 시 옆 박스와 근접 | label_pos를 박스가 없는 구간으로 변경. 공간 부족 시 라벨 제거(명세서에서 설명) |
 | elbow 화살표 경유점이 밀집하여 교차/혼잡 | 여러 elbow가 같은 VIA_Y에서 수평 이동 | 출발점을 src 하변에서 분산, 각각 다른 x에서 출발 |
 | 피드백 루프 라벨이 boundary 밖으로 벗어남 | 좌측/우측 채널이 boundary edge에 너무 가까움 | 라벨 제거하고 화살표만 유지, 또는 채널 x를 boundary+0.30 이상으로 |
+
+## v2.0 신규 기능 (IoT/Cloud 도면)
+
+### Cloud 도형
+```python
+# 기본: 크기 직접 지정
+c = d.cloud(cx, cy, w, h, '310\nCloud')
+
+# 자동: 텍스트에 맞게 크기 결정
+c = d.autocloud(cx, cy, '310\nDevice Owner', max_w=3.0)
+```
+- CloudRef 반환 → 화살표가 구름 실제 외곽(타원+bubble_r) 밖에서 출발/도착
+- `arrow_to_cloud_child(ext, cloud, internal)` → Cloud 통과 화살표
+
+### IoT Stack (복수 디바이스)
+```python
+s = d.iot_stack(x, y, w, h, '812\nMesh Devices', n=3)
+```
+
+### Callout (외부 참조번호)
+```python
+# tilde 스타일 (기본) — 짧은 곡선/물결선으로 박스 변에 연결
+d.ref_callout(b, '830', side='left')
+d.ref_callout(b, '830', side='left', strip_ref=True)  # 박스 내 번호 제거
+
+# curve 스타일 — 베지에 곡선 leader line
+d.ref_callout(b, '910', side='right', style='curve')
+
+# 버스선 callout — 빈 공간 자동 탐색
+d.ref_callout_bus(BUS_X, '806')
+```
+
+### 양방향 Fork
+```python
+d.arrow_fork_bidir(iface, [sensors, actuators])
+d.arrow_fork_bidir(iface, [sensors, actuators], via_x=5.8)
+```
+
+### Layer (Container 점선)
+```python
+# dash='short' (기본): dash-dot → 외곽 boundary와 시각적 구분
+d.layer(x1, y1, x2, y2, label='808 Storage')
+d.layer(x1, y1, x2, y2, label='808 Storage', dash='dotted')
+```
+
+## v2.0 필수 규칙 (코드가 강제)
+
+### 1. autobox() 우선 사용
+- `box()`도 텍스트+패딩 부족 시 자동 확장됨
+- 단, `autobox()` 사용이 권장 — 크기 계산을 코드에 맡기기
+- container(layer) 안의 box()는 container 폭을 초과하지 않도록 자동 제한
+
+### 2. 수동 좌표 계산 최소화
+- `layout(mode='flow'|'bus')` 사용 권장
+- 수동 배치 시에도 `equalize_heights()`, `equalize_widths()` 활용
+- 공간 낭비 65% 이상이면 validate 경고
+
+### 3. 화살표 방향 자동 감지
+- `arrow_h()`, `arrow_v()`, `arrow_bidir()` 모두 박스 상대 위치 자동 감지
+- LLM이 left/right 방향 신경 안 써도 됨
+
+### 4. 도형 겹침 자동 감지 (validate #13)
+- 모든 BoxRef/CloudRef 쌍에 대해 부분 겹침 경고
+- container 완전 포함은 허용 (layer-child 관계)
+
+### 5. container-child overflow 자동 감지 (validate #14)
+- layer 안의 box가 layer 밖으로 벗어나면 경고
+
+## v2.0 교훈 (LLM 실수 방지)
+
+| 실수 | 근본 원인 | 해결 |
+|------|-----------|------|
+| 수동 box()로 패딩 부족 | autobox 파이프라인 우회 | box() 자동 확장 + autobox 권장 |
+| Cloud와 인접 박스 겹침 | 겹침 검증 부재 | validate #13 추가 |
+| container보다 큰 서브블록 | 자동 확장 시 container 제한 없음 | box()에 layer 폭 제한 |
+| callout이 대상에 안 닿음 | tilde 문자 → 폰트 의존 | sine wave 직접 그리기 |
+| 버스 callout 위치 어색 | LLM 수동 배치 | ref_callout_bus() 빈 공간 자동 탐색 |
+| 점선 계층 구분 안 됨 | boundary/layer 동일 스타일 | layer dash-dot 패턴 |

@@ -500,6 +500,23 @@ class Drawing:
             INTER_LAYER_GAP = max(MIN_INTER, min(gap, avail_for_gaps / n_gaps))
             raw_w = total_box_w + INTER_LAYER_GAP * n_gaps
 
+            # 박스 너비 최종 확정 후 — 오버플로우 시 강제 래핑 (bus와 동일 로직)
+            _MIN_PAD_H = 0.18
+            for layer in layers:
+                for nd in layer:
+                    body_max_w = nd._w - _MIN_PAD_H
+                    nd.text = _wrap_text_to_width(
+                        nd.text, body_max_w,
+                        lambda t, _nd=nd: self.measure_text(t, _nd.fs)[0]
+                    )
+                    _, th_new = self.measure_text(nd.text, nd.fs)
+                    nd._h = max(nd._h, th_new + (pad_y or 0.14))
+            # 래핑 후 레이어 내 높이 재통일
+            for layer in layers:
+                max_h = max(nd._h for nd in layer)
+                for nd in layer:
+                    nd._h = max_h
+
             if raw_h > CONTENT_H:
                 # 레이어 내 gap 축소
                 max_boxes_in_layer = max(len(layer) for layer in layers)

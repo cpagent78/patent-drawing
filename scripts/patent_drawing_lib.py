@@ -431,9 +431,9 @@ class Drawing:
         if orphans:
             layers.append(orphans)
 
-        # Step 2b: 레이어 내 박스 크기 통일
-        # LR: 같은 레이어의 너비를 max로 통일 → right edge 정렬, via_x 동일
-        # TB: 같은 레이어의 높이를 max로 통일 → bottom edge 정렬
+        # Step 2b: 박스 크기 통일
+        # LR: 같은 레이어 내 너비 통일
+        # TB: 같은 레이어 내 높이 통일 + 모든 레이어 간 너비 통일 (1열 플로우 균일 박스)
         if direction == 'LR':
             for layer in layers:
                 max_w = max(nd._w for nd in layer)
@@ -444,6 +444,11 @@ class Drawing:
                 max_h = max(nd._h for nd in layer)
                 for nd in layer:
                     nd._h = max_h
+            # TB: 모든 레이어에 걸쳐 너비를 max로 통일 (플로우차트 균일 폭)
+            all_layer_nodes = [nd for layer in layers for nd in layer]
+            global_max_w = max(nd._w for nd in all_layer_nodes)
+            for nd in all_layer_nodes:
+                nd._w = global_max_w
 
         # Step 3: 위치 계산
         # USPTO 표준 boundary: x1=0.55, y1=1.10, x2=7.90, y2=10.15

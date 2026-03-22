@@ -132,11 +132,11 @@ class NodeDef:
     텍스트만 보유; 크기/위치는 layout() 시 결정됨.
     layout() 완료 후 .box_ref로 BoxRef 접근 가능.
     """
-    def __init__(self, text, fs=None, pad_x=0.20, pad_y=0.14):
+    def __init__(self, text, fs=None, pad_x=None, pad_y=None):
         self.text   = text
         self.fs     = fs
-        self.pad_x  = pad_x
-        self.pad_y  = pad_y
+        self.pad_x  = pad_x  # None이면 layout()의 pad_x 기본값 사용
+        self.pad_y  = pad_y  # None이면 layout()의 pad_y 기본값 사용
         self.box_ref: 'BoxRef | None' = None  # layout() 후 설정
 
     # layout() 후 BoxRef 속성 위임
@@ -219,7 +219,7 @@ class Drawing:
 
     # ── Graph-first API ───────────────────────────────────────────────────────
 
-    def node(self, text, fs=None, pad_x=0.20, pad_y=0.14) -> 'NodeDef':
+    def node(self, text, fs=None, pad_x=None, pad_y=None) -> 'NodeDef':
         """
         노드 등록. 텍스트만 정의; 크기/위치는 layout() 시 자동 결정.
         반환된 NodeDef는 layout() 후 BoxRef처럼 사용 가능.
@@ -625,8 +625,10 @@ class Drawing:
         if not rows:
             return
 
-        pad_x = pad_x or 0.20
-        pad_y = pad_y or 0.14
+        # 패딩 기본값: 검증 기준(좌우 각 0.09", 상하 각 0.07") + 여유
+        # measure_text가 실제 렌더링보다 ~0.15" 작게 측정되는 경향이 있어 여유 확보
+        pad_x = pad_x or 0.40
+        pad_y = pad_y or 0.26
         external = external or {}
 
         # Step 1: 모든 노드 크기 측정
@@ -698,11 +700,15 @@ class Drawing:
             excess -= gap_reduce * n_gaps
 
             # 2차: 내부 박스 패딩 축소
+            # 최솟값: 텍스트 너비 + 최소 패딩(좌우 각 0.09" = 합 0.18")
+            MIN_BOX_PAD_H = 0.18
             if excess > 0:
                 internal_nodes_list = [nd for row in rows for nd in row]
                 pad_reduce_per = excess / max(len(internal_nodes_list), 1)
                 for nd in internal_nodes_list:
-                    nd._w = max(nd._w - pad_reduce_per, 0.8)
+                    tw, _ = self.measure_text(nd.text, nd.fs)
+                    min_w = tw + MIN_BOX_PAD_H
+                    nd._w = max(nd._w - pad_reduce_per, min_w)
                 # 행 내 너비 재통일
                 for row in rows:
                     if row:

@@ -807,8 +807,9 @@ class Drawing:
 
             if 'right' in external and external['right']:
                 ext_nd = external['right'][0]
-                # ext_x: int_right + 점선외부여백 + shaft
-                ext_x = int_right + EXT_BND_GAP + 0.50
+                # ext_x: int_right(점선 포함) + 최소 shaft(0.44")
+                # 점선 바깥 여백(EXT_BND_GAP) 제거 — 점선과 external 사이는 shaft만으로 충분
+                ext_x = int_right + 0.44
                 ext_y = bus_y - ext_nd._h / 2
                 ext_nd.box_ref = self.box(ext_x, ext_y, ext_nd._w, ext_nd._h,
                                           ext_nd.text, ext_nd.fs)

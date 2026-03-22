@@ -1625,23 +1625,37 @@ class Drawing:
                         f'Move label down.')
 
         # 0. 텍스트가 박스 경계를 벗어나는지 실측 검증 (axes.transData 기반 정확한 측정)
+        # 최소 내부 패딩: 수평 0.09", 수직 0.07" (텍스트가 박스 내벽에 너무 붙으면 경고)
+        BOX_PAD_H = 0.09  # 좌우 각각
+        BOX_PAD_V = 0.07  # 상하 각각
         for cmd in self._cmds:
             if cmd[0] == 'box':
                 _, b, text, fs_override = cmd
                 short = text[:30].replace('\n', ' ')
                 if id(b) in self._box_text_sizes:
                     tw_in, th_in = self._box_text_sizes[id(b)]
-                    # 박스 내부 여백(pad) 제외하고 비교
+                    # 오버플로우 검사 (패딩 무시, 절대 넘으면 안 됨)
                     if tw_in > b.w + 0.01:
                         issues.append(
                             f'Box "{short}": text overflows horizontally '
                             f'(text={tw_in:.2f}", box={b.w:.2f}"). '
-                            f'Increase box width to at least {tw_in + 0.15:.2f}".')
+                            f'Increase box width to at least {tw_in + BOX_PAD_H*2:.2f}".')
                     if th_in > b.h + 0.01:
                         issues.append(
                             f'Box "{short}": text overflows vertically '
                             f'(text={th_in:.2f}", box={b.h:.2f}"). '
-                            f'Increase box height to at least {th_in + 0.12:.2f}".')
+                            f'Increase box height to at least {th_in + BOX_PAD_V*2:.2f}".')
+                    # 패딩 검사 (텍스트가 내벽에 너무 가까움)
+                    elif th_in > b.h - BOX_PAD_V * 2:
+                        issues.append(
+                            f'Box "{short}": vertical padding too tight '
+                            f'(text={th_in:.2f}", box={b.h:.2f}", pad={((b.h-th_in)/2):.2f}" < {BOX_PAD_V}" min). '
+                            f'Increase box height to at least {th_in + BOX_PAD_V*2:.2f}".')
+                    if tw_in > b.w - BOX_PAD_H * 2 and tw_in <= b.w + 0.01:
+                        issues.append(
+                            f'Box "{short}": horizontal padding too tight '
+                            f'(text={tw_in:.2f}", box={b.w:.2f}", pad={((b.w-tw_in)/2):.2f}" < {BOX_PAD_H}" min). '
+                            f'Increase box width to at least {tw_in + BOX_PAD_H*2:.2f}".')
 
         # 9a. 텍스트 최소 10pt 검증 (§1.84(p)(3))
         MIN_FS = 10.0

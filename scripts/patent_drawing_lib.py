@@ -1818,14 +1818,14 @@ class Drawing:
             by = ((1-t_vals)**3*anc[1] + 3*(1-t_vals)**2*t_vals*p1[1]
                   + 3*(1-t_vals)*t_vals**2*p2[1] + t_vals**3*p3[1])
             ax.plot(bx, by, color=BOX_EDGE, lw=LW_BOX*0.8,
-                    solid_capstyle='round', zorder=Z_ARROW)
+                    solid_capstyle='round', zorder=Z_FIG_LABEL + 1)
 
             label = ref_num
             t_obj = ax.text(txt_x, txt_y, label,
                             ha=ha, va=va,
-                            fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
+                            fontsize=fs, fontweight=FW, zorder=Z_FIG_LABEL + 2)
 
-        # boundary 검증용 실측 등록
+        # 겹침 감지: 기존 label_extents와 겹치면 y 자동 분산
         try:
             self.fig.canvas.draw()
             renderer = self.fig.canvas.get_renderer()
@@ -1833,11 +1833,28 @@ class Drawing:
             inv = ax.transData.inverted()
             pt0 = inv.transform((bb.x0, bb.y0))
             pt1 = inv.transform((bb.x1, bb.y1))
-            self._label_extents.append({
+            new_ext = {
                 'x0': min(pt0[0], pt1[0]), 'x1': max(pt0[0], pt1[0]),
                 'y0': min(pt0[1], pt1[1]), 'y1': max(pt0[1], pt1[1]),
                 'text': ref_num,
-            })
+            }
+            # 기존 extents와 겹치면 y 이동해서 해소
+            for ex in self._label_extents:
+                if (new_ext['x0'] < ex['x1'] + 0.05 and new_ext['x1'] > ex['x0'] - 0.05 and
+                    new_ext['y0'] < ex['y1'] + 0.03 and new_ext['y1'] > ex['y0'] - 0.03):
+                    shift = ex['y0'] - new_ext['y1'] - 0.06  # 기존 아래로
+                    t_obj.set_position((txt_x, txt_y + shift))
+                    self.fig.canvas.draw()
+                    bb2 = t_obj.get_window_extent(renderer=renderer)
+                    pt0 = inv.transform((bb2.x0, bb2.y0))
+                    pt1 = inv.transform((bb2.x1, bb2.y1))
+                    new_ext = {
+                        'x0': min(pt0[0], pt1[0]), 'x1': max(pt0[0], pt1[0]),
+                        'y0': min(pt0[1], pt1[1]), 'y1': max(pt0[1], pt1[1]),
+                        'text': ref_num,
+                    }
+                    break
+            self._label_extents.append(new_ext)
         except Exception:
             pass
 

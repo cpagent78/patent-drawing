@@ -1703,75 +1703,79 @@ class Drawing:
                     multialignment='center', zorder=Z_BOX_TEXT)
 
     def _render_ref_callout(self, ax, box, ref_num, side, offset, fs):
-        """참조번호를 박스 바깥에 배치하고 꺾인 leader line으로 연결."""
-        # side별 박스 위 연결점 (anchor) + 참조번호 위치 계산
-        elbow = 0.15  # leader line 꺾임 길이
-
+        """참조번호를 박스 바깥에 배치하고 꺾인 leader line으로 연결.
+        구조: 박스 anchor → 꺾임점 → 참조번호
+        """
+        # side별 설정: (박스 anchor, 꺾임 방향, 텍스트 정렬)
         if side == 'top-left':
-            ax_x, ax_y = box.left, box.top          # 박스 좌상단 모서리
-            rx = ax_x - offset
-            ry = ax_y + offset
-            # leader: 참조번호 → 오른쪽으로 → 박스 모서리로
-            lx1, ly1 = rx + (len(ref_num)*fs*0.6/72), ry
-            lx2, ly2 = ax_x, ax_y
+            anc = (box.left, box.top)
+            txt_x = box.left - offset
+            txt_y = box.top + offset
+            ha, va = 'right', 'bottom'
         elif side == 'top-right':
-            ax_x, ax_y = box.right, box.top
-            rx = ax_x + offset
-            ry = ax_y + offset
-            lx1, ly1 = rx - (len(ref_num)*fs*0.6/72), ry
-            lx2, ly2 = ax_x, ax_y
+            anc = (box.right, box.top)
+            txt_x = box.right + offset
+            txt_y = box.top + offset
+            ha, va = 'left', 'bottom'
         elif side == 'top':
-            ax_x, ax_y = box.cx, box.top
-            rx = ax_x
-            ry = ax_y + offset
-            lx1, ly1 = rx, ry - elbow
-            lx2, ly2 = ax_x, ax_y
+            anc = (box.cx, box.top)
+            txt_x = box.cx
+            txt_y = box.top + offset
+            ha, va = 'center', 'bottom'
         elif side == 'bottom-left':
-            ax_x, ax_y = box.left, box.bot
-            rx = ax_x - offset
-            ry = ax_y - offset
-            lx1, ly1 = rx + (len(ref_num)*fs*0.6/72), ry
-            lx2, ly2 = ax_x, ax_y
+            anc = (box.left, box.bot)
+            txt_x = box.left - offset
+            txt_y = box.bot - offset
+            ha, va = 'right', 'top'
         elif side == 'bottom-right':
-            ax_x, ax_y = box.right, box.bot
-            rx = ax_x + offset
-            ry = ax_y - offset
-            lx1, ly1 = rx - (len(ref_num)*fs*0.6/72), ry
-            lx2, ly2 = ax_x, ax_y
+            anc = (box.right, box.bot)
+            txt_x = box.right + offset
+            txt_y = box.bot - offset
+            ha, va = 'left', 'top'
         elif side == 'bottom':
-            ax_x, ax_y = box.cx, box.bot
-            rx = ax_x
-            ry = ax_y - offset
-            lx1, ly1 = rx, ry + elbow
-            lx2, ly2 = ax_x, ax_y
+            anc = (box.cx, box.bot)
+            txt_x = box.cx
+            txt_y = box.bot - offset
+            ha, va = 'center', 'top'
         elif side == 'left':
-            ax_x, ax_y = box.left, box.cy
-            rx = ax_x - offset
-            ry = ax_y
-            lx1, ly1 = rx + elbow, ry
-            lx2, ly2 = ax_x, ax_y
+            anc = (box.left, box.cy)
+            txt_x = box.left - offset
+            txt_y = box.cy
+            ha, va = 'right', 'center'
         elif side == 'right':
-            ax_x, ax_y = box.right, box.cy
-            rx = ax_x + offset
-            ry = ax_y
-            lx1, ly1 = rx - elbow, ry
-            lx2, ly2 = ax_x, ax_y
+            anc = (box.right, box.cy)
+            txt_x = box.right + offset
+            txt_y = box.cy
+            ha, va = 'left', 'center'
         else:
-            ax_x, ax_y = box.left, box.top
-            rx, ry = ax_x - offset, ax_y + offset
-            lx1, ly1 = rx, ry
-            lx2, ly2 = ax_x, ax_y
+            anc = (box.left, box.top)
+            txt_x = box.left - offset
+            txt_y = box.top + offset
+            ha, va = 'right', 'bottom'
 
-        # leader line: 참조번호 근처점 → 박스 모서리 (꺾인 선)
-        ax.plot([lx1, lx2], [ly1, ly2],
+        # leader line: anchor → 텍스트 위치 (단순 직선)
+        ax.plot([anc[0], txt_x], [anc[1], txt_y],
                 color=BOX_EDGE, lw=LW_BOX * 0.8,
                 solid_capstyle='round', zorder=Z_ARROW)
 
-        # 참조번호 텍스트
-        ha = 'right' if 'right' in side else ('center' if side in ('top','bottom') else 'left')
-        ax.text(rx, ry, ref_num,
-                ha=ha, va='center',
-                fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
+        # 참조번호 텍스트 + boundary 검증용 실측 등록
+        t_obj = ax.text(txt_x, txt_y, ref_num,
+                        ha=ha, va=va,
+                        fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
+        try:
+            self.fig.canvas.draw()
+            renderer = self.fig.canvas.get_renderer()
+            bb = t_obj.get_window_extent(renderer=renderer)
+            inv = ax.transData.inverted()
+            pt0 = inv.transform((bb.x0, bb.y0))
+            pt1 = inv.transform((bb.x1, bb.y1))
+            self._label_extents.append({
+                'x0': min(pt0[0], pt1[0]), 'x1': max(pt0[0], pt1[0]),
+                'y0': min(pt0[1], pt1[1]), 'y1': max(pt0[1], pt1[1]),
+                'text': ref_num,
+            })
+        except Exception:
+            pass
 
     def _render_brace(self, ax, x1, y1, x2, y2, side, label, fs):
         """중괄호 — matplotlib path로 그림."""

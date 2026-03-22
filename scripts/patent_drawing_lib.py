@@ -1703,59 +1703,78 @@ class Drawing:
                     multialignment='center', zorder=Z_BOX_TEXT)
 
     def _render_ref_callout(self, ax, box, ref_num, side, offset, fs):
-        """참조번호를 박스 바깥에 배치하고 꺾인 leader line으로 연결.
-        구조: 박스 anchor → 꺾임점 → 참조번호
+        """참조번호를 박스 바깥에 배치하고 곡선 leader line으로 연결.
+        - anchor: 박스 변(edge) 중간점 (모서리 아님)
+        - leader line: 베지에 곡선으로 부드럽게 연결
         """
-        # side별 설정: (박스 anchor, 꺾임 방향, 텍스트 정렬)
+        import numpy as np
+
+        # side별 anchor (변의 중간점) + 텍스트 위치
         if side == 'top-left':
-            anc = (box.left, box.top)
+            anc = (box.left + box.w * 0.25, box.top)   # 상단 변 좌측 1/4
             txt_x = box.left - offset
             txt_y = box.top + offset
             ha, va = 'right', 'bottom'
         elif side == 'top-right':
-            anc = (box.right, box.top)
+            anc = (box.left + box.w * 0.75, box.top)   # 상단 변 우측 3/4
             txt_x = box.right + offset
             txt_y = box.top + offset
             ha, va = 'left', 'bottom'
         elif side == 'top':
-            anc = (box.cx, box.top)
+            anc = (box.cx, box.top)                     # 상단 변 중앙
             txt_x = box.cx
             txt_y = box.top + offset
             ha, va = 'center', 'bottom'
         elif side == 'bottom-left':
-            anc = (box.left, box.bot)
+            anc = (box.left + box.w * 0.25, box.bot)   # 하단 변 좌측 1/4
             txt_x = box.left - offset
             txt_y = box.bot - offset
             ha, va = 'right', 'top'
         elif side == 'bottom-right':
-            anc = (box.right, box.bot)
+            anc = (box.left + box.w * 0.75, box.bot)   # 하단 변 우측 3/4
             txt_x = box.right + offset
             txt_y = box.bot - offset
             ha, va = 'left', 'top'
         elif side == 'bottom':
-            anc = (box.cx, box.bot)
+            anc = (box.cx, box.bot)                     # 하단 변 중앙
             txt_x = box.cx
             txt_y = box.bot - offset
             ha, va = 'center', 'top'
         elif side == 'left':
-            anc = (box.left, box.cy)
+            anc = (box.left, box.cy)                    # 좌측 변 중앙
             txt_x = box.left - offset
             txt_y = box.cy
             ha, va = 'right', 'center'
         elif side == 'right':
-            anc = (box.right, box.cy)
+            anc = (box.right, box.cy)                   # 우측 변 중앙
             txt_x = box.right + offset
             txt_y = box.cy
             ha, va = 'left', 'center'
         else:
-            anc = (box.left, box.top)
+            anc = (box.left + box.w * 0.25, box.top)
             txt_x = box.left - offset
             txt_y = box.top + offset
             ha, va = 'right', 'bottom'
 
-        # leader line: anchor → 텍스트 위치 (단순 직선)
-        ax.plot([anc[0], txt_x], [anc[1], txt_y],
-                color=BOX_EDGE, lw=LW_BOX * 0.8,
+        # 곡선 leader line — 2차 베지에 (anchor → control → txt)
+        # control point: anchor와 txt의 중간에서 수직 방향으로 살짝 벗어남
+        cx_ctrl = (anc[0] + txt_x) / 2
+        cy_ctrl = (anc[1] + txt_y) / 2
+        # 선분에 수직 방향으로 bow 추가
+        dx, dy = txt_x - anc[0], txt_y - anc[1]
+        length = max(np.hypot(dx, dy), 1e-6)
+        # 수직 단위벡터 (bow 방향)
+        perp_x, perp_y = -dy / length, dx / length
+        bow = min(offset * 0.4, 0.12)   # 최대 0.12" 곡률
+        cx_ctrl += perp_x * bow
+        cy_ctrl += perp_y * bow
+
+        # 2차 베지에 점 계산
+        t_vals = np.linspace(0, 1, 30)
+        bx = (1-t_vals)**2 * anc[0] + 2*(1-t_vals)*t_vals * cx_ctrl + t_vals**2 * txt_x
+        by = (1-t_vals)**2 * anc[1] + 2*(1-t_vals)*t_vals * cy_ctrl + t_vals**2 * txt_y
+
+        ax.plot(bx, by, color=BOX_EDGE, lw=LW_BOX * 0.8,
                 solid_capstyle='round', zorder=Z_ARROW)
 
         # 참조번호 텍스트 + boundary 검증용 실측 등록

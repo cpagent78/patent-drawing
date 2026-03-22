@@ -1302,21 +1302,20 @@ class Drawing:
         self._cmds.append(('iot_stack', x, y, w, h, text, n, offset, fs or FS_BODY, b))
         return b
 
-    def ref_callout(self, box: BoxRef, ref_num: str, side='top-left',
-                    offset=0.30, fs=None):
+    def ref_callout(self, box: BoxRef, ref_num: str, side='left',
+                    offset=0.15, fs=None):
         """
-        참조번호를 박스 밖에 배치하고 leader line으로 연결 (callout 스타일).
-        박스 내부 공간이 부족하거나 외부 배치가 필요할 때 사용.
+        참조번호를 박스 바깥에 '552~' 스타일로 배치 (USPTO 표준).
+        물결표(~)가 박스 변에 닿는 방식 — 곡선 직접 그리기 없음.
 
-        side: 참조번호 위치
-          'top-left', 'top-right', 'top', 'bottom-left', 'bottom-right',
-          'bottom', 'left', 'right'
-        offset: 박스 edge에서 참조번호까지 거리 (인치)
+        side: 'left'(기본), 'right', 'top', 'bottom',
+              'top-left', 'top-right', 'bottom-left', 'bottom-right'
+        offset: 박스 변에서 ~ 끝까지 간격 (기본 0.15")
         fs: 폰트 크기
 
         사용:
-            b = d.iot_stack(...)
-            d.ref_callout(b, '314', side='top-left')
+            b = d.box(...)
+            d.ref_callout(b, '552', side='left')   → '552~' 가 박스 왼쪽에 표시
         """
         self._cmds.append(('ref_callout', box, ref_num, side, offset, fs or FS_BODY))
 
@@ -1703,92 +1702,33 @@ class Drawing:
                     multialignment='center', zorder=Z_BOX_TEXT)
 
     def _render_ref_callout(self, ax, box, ref_num, side, offset, fs):
-        """참조번호를 박스 바깥에 배치하고 곡선 leader line으로 연결.
-        - anchor: 박스 변(edge) 중간점 (모서리 아님)
-        - leader line: 베지에 곡선으로 부드럽게 연결
-        """
-        import numpy as np
+        """USPTO 표준 '552~' 스타일 callout.
+        물결표(~)가 박스 변에 닿고 번호는 그 옆에 배치. 곡선 없음."""
+        TILDE = '~'
 
-        # side별 anchor + 출발 방향 단위벡터 (변에 수직) + 텍스트 위치
-        # top-left/top-right: left/right 변에서 출발 (모서리 혼동 방지)
-        dep = offset * 0.6   # 출발 방향 컨트롤 거리
-
-        if side == 'top-left':
-            anc = (box.left + box.w * 0.25, box.top)   # 상단 변 좌측 1/4
-            dep_dir = (0, 1)                            # 위쪽으로 출발
-            txt_x = box.left - offset * 0.5
-            txt_y = box.top + offset
-            ha, va = 'right', 'bottom'
-        elif side == 'top-right':
-            anc = (box.left + box.w * 0.75, box.top)   # 상단 변 우측 3/4
-            dep_dir = (0, 1)                            # 위쪽으로 출발
-            txt_x = box.right + offset * 0.5
-            txt_y = box.top + offset
-            ha, va = 'left', 'bottom'
+        if side in ('left', 'top-left', 'bottom-left'):
+            anc_y = box.cy if side == 'left' else (box.top if side == 'top-left' else box.bot)
+            label = ref_num + TILDE
+            t_obj = ax.text(box.left - offset, anc_y, label,
+                            ha='right', va='center',
+                            fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
+        elif side in ('right', 'top-right', 'bottom-right'):
+            anc_y = box.cy if side == 'right' else (box.top if side == 'top-right' else box.bot)
+            label = TILDE + ref_num
+            t_obj = ax.text(box.right + offset, anc_y, label,
+                            ha='left', va='center',
+                            fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
         elif side == 'top':
-            anc = (box.cx, box.top)                     # 상단 변 중앙
-            dep_dir = (0, 1)                            # 위로 출발
-            txt_x = box.cx
-            txt_y = box.top + offset
-            ha, va = 'center', 'bottom'
-        elif side == 'bottom-left':
-            anc = (box.left + box.w * 0.25, box.bot)   # 하단 변 좌측 1/4
-            dep_dir = (0, -1)                           # 아래로 출발
-            txt_x = box.left - offset * 0.5
-            txt_y = box.bot - offset
-            ha, va = 'right', 'top'
-        elif side == 'bottom-right':
-            anc = (box.left + box.w * 0.75, box.bot)   # 하단 변 우측 3/4
-            dep_dir = (0, -1)                           # 아래로 출발
-            txt_x = box.right + offset * 0.5
-            txt_y = box.bot - offset
-            ha, va = 'left', 'top'
-        elif side == 'bottom':
-            anc = (box.cx, box.bot)                     # 하단 변 중앙
-            dep_dir = (0, -1)                           # 아래로 출발
-            txt_x = box.cx
-            txt_y = box.bot - offset
-            ha, va = 'center', 'top'
-        elif side == 'left':
-            anc = (box.left, box.cy)                    # 좌측 변 중앙
-            dep_dir = (-1, 0)                           # 왼쪽으로 출발
-            txt_x = box.left - offset
-            txt_y = box.cy
-            ha, va = 'right', 'center'
-        elif side == 'right':
-            anc = (box.right, box.cy)                   # 우측 변 중앙
-            dep_dir = (1, 0)                            # 오른쪽으로 출발
-            txt_x = box.right + offset
-            txt_y = box.cy
-            ha, va = 'left', 'center'
-        else:
-            anc = (box.left, box.top - box.h * 0.25)
-            dep_dir = (-1, 0)
-            txt_x = box.left - offset
-            txt_y = box.top + offset * 0.5
-            ha, va = 'right', 'center'
+            label = ref_num + TILDE
+            t_obj = ax.text(box.left - offset, box.top, label,
+                            ha='right', va='center',
+                            fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
+        else:  # bottom
+            label = ref_num + TILDE
+            t_obj = ax.text(box.left - offset, box.bot, label,
+                            ha='right', va='center',
+                            fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
 
-        # 3차 베지에 — 변에서 수직으로 출발 후 텍스트로 자연스럽게 연결
-        # P0=anchor, P1=출발 컨트롤, P2=도착 컨트롤, P3=텍스트
-        p0 = np.array(anc)
-        p1 = p0 + np.array(dep_dir) * dep          # 출발: 변 수직 방향
-        p3 = np.array([txt_x, txt_y])
-        # 도착 컨트롤: 텍스트에서 출발 방향(동일)으로 → S자 곡선 방지
-        p2 = p3 + np.array(dep_dir) * dep
-
-        t_vals = np.linspace(0, 1, 40)
-        bx = ((1-t_vals)**3 * p0[0] + 3*(1-t_vals)**2*t_vals * p1[0]
-              + 3*(1-t_vals)*t_vals**2 * p2[0] + t_vals**3 * p3[0])
-        by = ((1-t_vals)**3 * p0[1] + 3*(1-t_vals)**2*t_vals * p1[1]
-              + 3*(1-t_vals)*t_vals**2 * p2[1] + t_vals**3 * p3[1])
-
-        ax.plot(bx, by, color=BOX_EDGE, lw=LW_BOX * 0.8,
-                solid_capstyle='round', zorder=Z_ARROW)
-
-        # 참조번호 텍스트 + boundary 검증용 실측 등록
-        t_obj = ax.text(txt_x, txt_y, ref_num,
-                        ha=ha, va=va,
-                        fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
         try:
             self.fig.canvas.draw()
             renderer = self.fig.canvas.get_renderer()
@@ -1799,7 +1739,7 @@ class Drawing:
             self._label_extents.append({
                 'x0': min(pt0[0], pt1[0]), 'x1': max(pt0[0], pt1[0]),
                 'y0': min(pt0[1], pt1[1]), 'y1': max(pt0[1], pt1[1]),
-                'text': ref_num,
+                'text': label,
             })
         except Exception:
             pass

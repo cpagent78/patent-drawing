@@ -1518,7 +1518,7 @@ class Drawing:
         # Pass 1: boundary / layer
         DASH_STYLES = {
             'long': '--',           # 외곽 boundary 기본
-            'short': (0, (4, 3)),   # 내부 layer (짧은 점선)
+            'short': (0, (3, 2, 1, 2)),  # 내부 layer (dash-dot, 외곽과 뚜렷히 구분)
             'dotted': ':',          # 점선
             'solid': '-',           # 실선
         }
@@ -1853,12 +1853,18 @@ class Drawing:
                     pt0 = inv.transform((bb.x0, bb.y0))
                     pt1 = inv.transform((bb.x1, bb.y1))
                     txt_w = abs(pt1[0] - pt0[0])
-                    # 텍스트 right edge = edge_x - MIN_GAP - 물결 공간
-                    WAVE_LEN = 0.12  # 물결선 길이
-                    final_x = edge_x - MIN_GAP - WAVE_LEN
+                    # 실측 텍스트 right edge에서 박스 left edge까지 물결선
+                    txt_right = max(pt0[0], pt1[0])
+                    # 텍스트를 최종 위치로: right edge + gap + wave = edge_x
+                    WAVE_LEN = max(edge_x - txt_right - MIN_GAP, 0.10)
+                    final_x = edge_x - WAVE_LEN - MIN_GAP
                     t_obj.set_position((final_x, anc_y))
-                    # 물결선: 텍스트 right → 박스 left
-                    wave_start_x = final_x + txt_w * 0.02
+                    # 재측정
+                    self.fig.canvas.draw()
+                    bb2 = t_obj.get_window_extent(renderer=renderer)
+                    pt0b = inv.transform((bb2.x0, bb2.y0))
+                    pt1b = inv.transform((bb2.x1, bb2.y1))
+                    wave_start_x = max(pt0b[0], pt1b[0]) + 0.02  # 텍스트 실제 right + 약간
                     wave_end_x = edge_x
                 else:
                     tmp_x = edge_x + MIN_GAP * 3

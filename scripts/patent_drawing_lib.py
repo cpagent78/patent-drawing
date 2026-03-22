@@ -992,13 +992,17 @@ class Drawing:
         """페이지 경계 (점선 직사각형). is_page_boundary=True이면 마진 검증 대상."""
         self._cmds.append(('boundary', x1, y1, x2, y2, label, is_page_boundary))
 
-    def layer(self, x1, y1, x2, y2, label=""):
+    def layer(self, x1, y1, x2, y2, label="", dash='short'):
         """
         내부 레이어 경계 (점선 박스 + 참조번호).
-        boundary(is_page_boundary=False) 단축 메서드.
-        사용: d.layer(0.55, 7.40, 7.95, 10.10, "EDGE LAYER  110")
+        dash: 'long'(외곽과 같은 큰 점선), 'short'(짧은 점선, 기본),
+              'dotted'(점), 'solid'(실선)
+        → 외곽 boundary와 시각적 계층 구분.
+        사용: d.layer(0.55, 7.40, 7.95, 10.10, "808 Storage", dash='short')
         """
-        self._cmds.append(('boundary', x1, y1, x2, y2, label, False))
+        # dash 스타일을 label 뒤에 인코딩
+        encoded_label = f"{label}|{dash}" if dash != 'long' else label
+        self._cmds.append(('boundary', x1, y1, x2, y2, encoded_label, False))
 
     def _auto_wrap(self, text, max_w, fs=None):
         """
@@ -1191,11 +1195,22 @@ class Drawing:
 
     def box(self, x, y, w, h, text, fs=None) -> BoxRef:
         """
-        박스 추가. 텍스트 폰트 자동 축소.
+        박스 추가. w/h가 텍스트+패딩보다 작으면 자동 확장.
         text 형식: "102\\nCPU" (파이프 문자 금지)
-        주의: _normalize_node_text는 node()/autobox() 진입점에서만 적용.
-              box()는 이미 정규화/래핑된 텍스트를 그대로 받음.
         """
+        # 텍스트 실측 → w/h가 부족하면 자동 확장
+        MIN_PAD_W, MIN_PAD_H = 0.18, 0.14
+        tw, th = self.measure_text(text, fs or FS_BODY)
+        min_w = tw + MIN_PAD_W
+        min_h = th + MIN_PAD_H
+        if w < min_w:
+            cx = x + w / 2
+            w = min_w
+            x = cx - w / 2
+        if h < min_h:
+            cy = y + h / 2
+            h = min_h
+            y = cy - h / 2
         b = BoxRef(x, y, w, h)
         self._box_refs.append(b)
         self._cmds.append(('box', b, text, fs))
@@ -1501,16 +1516,29 @@ class Drawing:
         bnd_rect = None
 
         # Pass 1: boundary / layer
+        DASH_STYLES = {
+            'long': '--',           # 외곽 boundary 기본
+            'short': (0, (4, 3)),   # 내부 layer (짧은 점선)
+            'dotted': ':',          # 점선
+            'solid': '-',           # 실선
+        }
         for cmd in self._cmds:
             if cmd[0] == 'boundary':
                 _, x1, y1, x2, y2, lbl, is_page = cmd
+                # layer dash 스타일 파싱 ('label|short' 형식)
+                dash_style = '--'
+                display_lbl = lbl
+                if not is_page and '|' in lbl:
+                    parts = lbl.rsplit('|', 1)
+                    display_lbl = parts[0]
+                    dash_style = DASH_STYLES.get(parts[1], '--')
                 ax.add_patch(FancyBboxPatch(
                     (x1, y1), x2-x1, y2-y1,
                     boxstyle="square,pad=0",
                     facecolor='none', edgecolor=BOX_EDGE,
-                    linewidth=LW_FRAME, linestyle='--', zorder=Z_BOUNDARY))
-                if lbl:
-                    ax.text(x1+0.12, y2-0.12, lbl,
+                    linewidth=LW_FRAME, linestyle=dash_style, zorder=Z_BOUNDARY))
+                if display_lbl:
+                    ax.text(x1+0.12, y2-0.12, display_lbl,
                             ha='left', va='top',
                             fontsize=FS_BODY, fontweight=FW, zorder=Z_BND_LABEL)
                 if is_page:
@@ -1743,100 +1771,144 @@ class Drawing:
                     multialignment='center', zorder=Z_BOX_TEXT)
 
     def _render_ref_callout(self, ax, box, ref_num, side, offset, fs):
-        """USPTO ref callout.
-        style은 ref_callout() 호출 시 ref_num 앞뒤에 ~ 붙이거나 curve로 결정.
-        실제 style 파라미터는 ref_callout cmd tuple에 포함.
-        """
+        """USPTO callout — 참조번호 텍스트 + 물결선(sine) 직접 그리기.
+        tilde 문자 미사용 → 텍스트 끝에서 박스 변까지 물결선을 정확히 그림.
+        offset 파라미터는 참조번호와 박스 사이 최소 갭(기본 0.08").
+        style은 side에 ':curve' 또는 ':tilde' 인코딩 (기본 tilde → 물결선)."""
         import numpy as np
 
-        TILDE = '~'
-
-        # cmd tuple: ('ref_callout', box, ref_num, side, offset, fs, style)
-        # style은 _cmds append 시 함께 저장 필요 → 이미 저장된 경우 처리
-        # (이 메서드는 style을 직접 받지 않으므로 side에 인코딩)
-        # side 형식: 'left', 'left:curve', 'right:tilde' 등
         parts = side.split(':')
         base_side = parts[0]
         style = parts[1] if len(parts) > 1 else 'tilde'
+        
+        MIN_GAP = 0.08  # 참조번호 텍스트와 박스 변 사이 최소 갭
 
-        # ── Tilde 스타일 ──────────────────────────────────────────────────────
-        if style == 'tilde':
-            if base_side in ('left', 'top-left', 'bottom-left'):
-                anc_y = box.cy if base_side == 'left' else (box.top if base_side == 'top-left' else box.bot)
-                label = ref_num + TILDE
-                t_obj = ax.text(box.left - offset, anc_y, label,
-                                ha='right', va='center',
-                                fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
-            elif base_side in ('right', 'top-right', 'bottom-right'):
-                anc_y = box.cy if base_side == 'right' else (box.top if base_side == 'top-right' else box.bot)
-                label = TILDE + ref_num
-                t_obj = ax.text(box.right + offset, anc_y, label,
-                                ha='left', va='center',
-                                fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
-            elif base_side == 'top':
-                label = ref_num + TILDE
-                t_obj = ax.text(box.left - offset, box.top, label,
-                                ha='right', va='center',
-                                fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
-            else:  # bottom
-                label = ref_num + TILDE
-                t_obj = ax.text(box.left - offset, box.bot, label,
-                                ha='right', va='center',
-                                fontsize=fs, fontweight=FW, zorder=Z_BOX_TEXT)
+        # ── 공통: 박스 변 좌표 + 텍스트 위치 계산 ────────────────────────────
+        if base_side in ('left', 'top-left', 'bottom-left'):
+            edge_x = box.left
+            anc_y = box.cy if base_side == 'left' else (box.top - box.h*0.25 if 'top' in base_side else box.bot + box.h*0.25)
+            txt_ha, txt_va = 'right', 'center'
+            wave_dir = 'h'  # 수평 물결
+        elif base_side in ('right', 'top-right', 'bottom-right'):
+            edge_x = box.right
+            anc_y = box.cy if base_side == 'right' else (box.top - box.h*0.25 if 'top' in base_side else box.bot + box.h*0.25)
+            txt_ha, txt_va = 'left', 'center'
+            wave_dir = 'h'
+        elif base_side == 'top':
+            edge_y = box.top
+            anc_x = box.left + box.w * 0.3
+            txt_ha, txt_va = 'center', 'bottom'
+            wave_dir = 'v'
+        else:  # bottom
+            edge_y = box.bot
+            anc_x = box.left + box.w * 0.3
+            txt_ha, txt_va = 'center', 'top'
+            wave_dir = 'v'
 
-        # ── Curve 스타일 ──────────────────────────────────────────────────────
-        else:
-            # 박스 anchor (변 중간점) + 법선 방향
-            if base_side in ('left', 'top-left', 'bottom-left'):
-                # 앵커: 상단 1/4 지점 → 짧고 자연스러운 곡선
-                anc_y = box.top - box.h * 0.25
-                anc = np.array([box.left, anc_y])
-                normal = np.array([-1.0, 0.0])
-                txt_x = box.left - offset * 1.5
+        if style == 'curve':
+            # ── Curve 스타일 (기존 베지에) ────────────────────────────────────
+            if wave_dir == 'h':
+                anc = np.array([edge_x, anc_y])
+                normal = np.array([-1.0, 0.0]) if 'left' in base_side else np.array([1.0, 0.0])
+                txt_x = edge_x + normal[0] * (offset * 2.5)
                 txt_y = anc_y + offset * 1.4
-                ha, va = 'right', 'bottom'
-            elif base_side in ('right', 'top-right', 'bottom-right'):
-                anc_y = box.top - box.h * 0.25
-                anc = np.array([box.right, anc_y])
-                normal = np.array([1.0, 0.0])
-                txt_x = box.right + offset * 1.5
-                txt_y = anc_y + offset * 1.4
-                ha, va = 'left', 'bottom'
-            elif base_side == 'top':
-                anc = np.array([box.left + box.w * 0.28, box.top])
-                normal = np.array([0.0, 1.0])
-                txt_x = box.left + box.w * 0.28 - offset * 0.3
-                txt_y = box.top + offset * 2.2
-                ha, va = 'right', 'bottom'
-            else:  # bottom
-                anc = np.array([box.left + box.w * 0.28, box.bot])
-                normal = np.array([0.0, -1.0])
-                txt_x = box.left + box.w * 0.28 - offset * 0.3
-                txt_y = box.bot - offset * 2.2
-                ha, va = 'right', 'top'
+            else:
+                anc = np.array([anc_x, edge_y])
+                normal = np.array([0.0, 1.0]) if base_side == 'top' else np.array([0.0, -1.0])
+                txt_x = anc_x
+                txt_y = edge_y + normal[1] * (offset * 2.5)
 
             p3 = np.array([txt_x, txt_y])
-            # P1: 박스 변에서 법선 방향으로 진출
-            # ctrl_len을 거리의 0.7배로 → 더 뚜렷한 곡선
-            ctrl_len = max(np.linalg.norm(p3 - anc) * 0.70, offset * 2.0, 0.35)
+            ctrl_len = max(np.linalg.norm(p3 - anc) * 0.70, 0.35)
             p1 = anc + normal * ctrl_len
-            # P2: 텍스트에서 법선 방향으로 (같은 방향 → S자 방지, 부드러운 진입)
             p2 = p3 - normal * ctrl_len * 0.4
 
             t_vals = np.linspace(0, 1, 40)
-            bx = ((1-t_vals)**3*anc[0] + 3*(1-t_vals)**2*t_vals*p1[0]
-                  + 3*(1-t_vals)*t_vals**2*p2[0] + t_vals**3*p3[0])
-            by = ((1-t_vals)**3*anc[1] + 3*(1-t_vals)**2*t_vals*p1[1]
-                  + 3*(1-t_vals)*t_vals**2*p2[1] + t_vals**3*p3[1])
+            bx = (1-t_vals)**3*anc[0] + 3*(1-t_vals)**2*t_vals*p1[0] + 3*(1-t_vals)*t_vals**2*p2[0] + t_vals**3*p3[0]
+            by = (1-t_vals)**3*anc[1] + 3*(1-t_vals)**2*t_vals*p1[1] + 3*(1-t_vals)*t_vals**2*p2[1] + t_vals**3*p3[1]
             ax.plot(bx, by, color=BOX_EDGE, lw=LW_BOX*0.8,
                     solid_capstyle='round', zorder=Z_FIG_LABEL + 1)
 
-            label = ref_num
-            t_obj = ax.text(txt_x, txt_y, label,
-                            ha=ha, va=va,
+            t_obj = ax.text(txt_x, txt_y, ref_num,
+                            ha=txt_ha if wave_dir == 'h' else 'right',
+                            va=txt_va if wave_dir == 'h' else ('bottom' if base_side == 'top' else 'top'),
                             fontsize=fs, fontweight=FW, zorder=Z_FIG_LABEL + 2)
 
-        # 겹침 감지: 기존 label_extents와 겹치면 y 자동 분산
+        else:
+            # ── Tilde 스타일 → 물결선 직접 그리기 ─────────────────────────────
+            # 1. 참조번호 텍스트를 임시 렌더 → 실측
+            if wave_dir == 'h':
+                # 좌측: 텍스트 right edge → 박스 left edge 사이 물결선
+                # 우측: 박스 right edge → 텍스트 left edge 사이 물결선
+                if 'left' in base_side:
+                    # 텍스트를 박스 왼쪽에 배치 (ha='right', x는 나중에 조정)
+                    tmp_x = edge_x - MIN_GAP * 3  # 임시 위치
+                    t_obj = ax.text(tmp_x, anc_y, ref_num,
+                                    ha='right', va='center',
+                                    fontsize=fs, fontweight=FW, zorder=Z_FIG_LABEL + 2)
+                    self.fig.canvas.draw()
+                    renderer = self.fig.canvas.get_renderer()
+                    bb = t_obj.get_window_extent(renderer=renderer)
+                    inv = ax.transData.inverted()
+                    pt0 = inv.transform((bb.x0, bb.y0))
+                    pt1 = inv.transform((bb.x1, bb.y1))
+                    txt_w = abs(pt1[0] - pt0[0])
+                    # 텍스트 right edge = edge_x - MIN_GAP - 물결 공간
+                    WAVE_LEN = 0.12  # 물결선 길이
+                    final_x = edge_x - MIN_GAP - WAVE_LEN
+                    t_obj.set_position((final_x, anc_y))
+                    # 물결선: 텍스트 right → 박스 left
+                    wave_start_x = final_x + txt_w * 0.02
+                    wave_end_x = edge_x
+                else:
+                    tmp_x = edge_x + MIN_GAP * 3
+                    t_obj = ax.text(tmp_x, anc_y, ref_num,
+                                    ha='left', va='center',
+                                    fontsize=fs, fontweight=FW, zorder=Z_FIG_LABEL + 2)
+                    self.fig.canvas.draw()
+                    renderer = self.fig.canvas.get_renderer()
+                    bb = t_obj.get_window_extent(renderer=renderer)
+                    inv = ax.transData.inverted()
+                    pt0 = inv.transform((bb.x0, bb.y0))
+                    pt1 = inv.transform((bb.x1, bb.y1))
+                    txt_w = abs(pt1[0] - pt0[0])
+                    WAVE_LEN = 0.12
+                    final_x = edge_x + MIN_GAP + WAVE_LEN
+                    t_obj.set_position((final_x, anc_y))
+                    wave_start_x = edge_x
+                    wave_end_x = final_x - txt_w * 0.02
+
+                # 물결선 그리기 (sine wave)
+                n_pts = 30
+                wx = np.linspace(wave_start_x, wave_end_x, n_pts)
+                wave_amp = 0.03  # 물결 진폭
+                n_cycles = 2
+                wy = anc_y + wave_amp * np.sin(n_cycles * 2 * np.pi * np.linspace(0, 1, n_pts))
+                ax.plot(wx, wy, color=BOX_EDGE, lw=LW_BOX * 0.7,
+                        solid_capstyle='round', zorder=Z_FIG_LABEL + 1)
+
+            else:
+                # 수직 물결 (top/bottom) — 간단 구현
+                if base_side == 'top':
+                    t_obj = ax.text(anc_x, edge_y + MIN_GAP + 0.12, ref_num,
+                                    ha='center', va='bottom',
+                                    fontsize=fs, fontweight=FW, zorder=Z_FIG_LABEL + 2)
+                    wy = np.linspace(edge_y, edge_y + MIN_GAP + 0.10, 30)
+                    wave_amp = 0.03
+                    wx = anc_x + wave_amp * np.sin(2 * 2 * np.pi * np.linspace(0, 1, 30))
+                    ax.plot(wx, wy, color=BOX_EDGE, lw=LW_BOX * 0.7,
+                            solid_capstyle='round', zorder=Z_FIG_LABEL + 1)
+                else:
+                    t_obj = ax.text(anc_x, edge_y - MIN_GAP - 0.12, ref_num,
+                                    ha='center', va='top',
+                                    fontsize=fs, fontweight=FW, zorder=Z_FIG_LABEL + 2)
+                    wy = np.linspace(edge_y - MIN_GAP - 0.10, edge_y, 30)
+                    wave_amp = 0.03
+                    wx = anc_x + wave_amp * np.sin(2 * 2 * np.pi * np.linspace(0, 1, 30))
+                    ax.plot(wx, wy, color=BOX_EDGE, lw=LW_BOX * 0.7,
+                            solid_capstyle='round', zorder=Z_FIG_LABEL + 1)
+
+        # 겹침 감지 + boundary 검증용 실측 등록
         try:
             self.fig.canvas.draw()
             renderer = self.fig.canvas.get_renderer()
@@ -1849,12 +1921,12 @@ class Drawing:
                 'y0': min(pt0[1], pt1[1]), 'y1': max(pt0[1], pt1[1]),
                 'text': ref_num,
             }
-            # 기존 extents와 겹치면 y 이동해서 해소
             for ex in self._label_extents:
                 if (new_ext['x0'] < ex['x1'] + 0.05 and new_ext['x1'] > ex['x0'] - 0.05 and
                     new_ext['y0'] < ex['y1'] + 0.03 and new_ext['y1'] > ex['y0'] - 0.03):
-                    shift = ex['y0'] - new_ext['y1'] - 0.06  # 기존 아래로
-                    t_obj.set_position((txt_x, txt_y + shift))
+                    shift = ex['y0'] - new_ext['y1'] - 0.06
+                    pos = t_obj.get_position()
+                    t_obj.set_position((pos[0], pos[1] + shift))
                     self.fig.canvas.draw()
                     bb2 = t_obj.get_window_extent(renderer=renderer)
                     pt0 = inv.transform((bb2.x0, bb2.y0))
@@ -2436,5 +2508,23 @@ class Drawing:
                                 f'Arrow passes through box "{box_text}": '
                                 f'segment ({ax0:.2f},{ay0:.2f})→({ax1:.2f},{ay1:.2f}) '
                                 f'crosses box text area. Reroute the arrow.')
+
+        # 12. 공간 낭비 검증: boundary 내 빈 공간이 25% 이상이면 경고
+        if bnd_rect and self._box_refs:
+            bx1, by1, bx2, by2 = bnd_rect
+            bnd_area = (bx2 - bx1) * (by2 - by1)
+            # 모든 박스의 최대 범위 계산 (content bounding box)
+            content_top = max(b.top for b in self._box_refs)
+            content_bot = min(b.bot for b in self._box_refs)
+            content_left = min(b.left for b in self._box_refs)
+            content_right = max(b.right for b in self._box_refs)
+            content_h = content_top - content_bot + 0.60  # 상하 여백
+            bnd_h = by2 - by1
+            usage = content_h / bnd_h if bnd_h > 0 else 1.0
+            if usage < 0.65:
+                issues.append(
+                    f'Space usage {usage*100:.0f}%: boundary height {bnd_h:.1f}" but '
+                    f'content height {content_h:.1f}". Consider reducing boundary or '
+                    f'increasing content spacing for better space utilization.')
 
         return issues

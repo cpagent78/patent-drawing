@@ -1287,6 +1287,97 @@ class Drawing:
         self._cmds.append(('cloud', cx, cy, w, h, text, fs or FS_BODY, b))
         return b
 
+    # ── 신규 패턴 (learn/new-shapes) ──────────────────────────────────────────
+
+    def database_cylinder(self, cx, cy, w, h, text="", fs=None) -> BoxRef:
+        """
+        실린더형 DB 도형 (특허 도면 표준 데이터 저장소).
+        직사각형 몸체 + 상단/하단 타원으로 구성.
+        반환: BoxRef(cx-w/2, cy-h/2, w, h) — box_refs에 등록됨.
+
+        사용:
+            db = d.database_cylinder(4.0, 5.5, 1.4, 1.0, '310\nDB')
+            d.arrow_v(box, db)
+        """
+        b = BoxRef(cx - w / 2, cy - h / 2, w, h)
+        self._box_refs.append(b)
+        self._cmds.append(('database_cylinder', cx, cy, w, h, text, fs or FS_BODY, b))
+        return b
+
+    def oval(self, cx, cy, w, h, text="", fs=None) -> BoxRef:
+        """
+        타원형 프로세서 노드 (터미널/단말/처리 노드).
+        특허 도면에서 시작/끝 단말(start/end terminal) 또는 CPU/처리 노드로 사용.
+        반환: BoxRef — edge_toward() 등 BoxRef 메서드 사용 가능.
+
+        사용:
+            cpu = d.oval(4.0, 6.5, 1.6, 0.7, '200\nCPU')
+            d.arrow_diagonal(cpu, db)  # or arrow_v, arrow_h
+        """
+        b = BoxRef(cx - w / 2, cy - h / 2, w, h)
+        self._box_refs.append(b)
+        self._cmds.append(('oval', cx, cy, w, h, text, fs or FS_BODY, b))
+        return b
+
+    def arrow_wireless(self, box_a: BoxRef, box_b: BoxRef, label="") -> None:
+        """
+        지그재그 무선 연결선 (wireless communication link).
+        두 박스 사이를 지그재그 패턴으로 연결하여 무선 채널을 표현.
+        label이 있으면 중간에 표시 (예: "802.11n").
+        연결 방향: box_a → box_b (단방향 화살촉).
+
+        사용:
+            d.arrow_wireless(ap, device, label='802.11n')
+        """
+        self._cmds.append(('arrow_wireless', box_a, box_b, label))
+
+    def wireless_signal(self, x, y, direction='right', n_arcs=3, scale=0.25) -> None:
+        """
+        ))) 동심원 방사 아이콘 — 안테나/무선 신호 방사 표현.
+        direction: 'right'(→), 'left'(←), 'up'(↑), 'down'(↓)
+        n_arcs: 호 개수 (기본 3)
+        scale: 호 크기 단위 (인치, 기본 0.25")
+
+        사용:
+            d.wireless_signal(5.0, 7.0, direction='right')   # )))
+            d.wireless_signal(3.0, 7.0, direction='left')    # (((
+        """
+        self._cmds.append(('wireless_signal', x, y, direction, n_arcs, scale))
+
+    def ellipsis_repeat(self, box_a: BoxRef, box_b: BoxRef,
+                        label_a="1", label_b="N") -> None:
+        """
+        A...N 반복 표현 — 두 박스 사이에 '...' 점줄임 + 반복 라벨 표시.
+        특허 도면에서 복수 인스턴스(1~N)를 압축 표현할 때 사용.
+        label_a: 시작 라벨 (기본 "1"), label_b: 끝 라벨 (기본 "N")
+
+        시각 효과:
+            [box_a] ---1--- ... ---N--- [box_b]
+            또는 수직 배치 시 점선 연결 + 측면 라벨
+
+        사용:
+            d.ellipsis_repeat(node1, nodeN, label_a='1', label_b='N')
+        """
+        self._cmds.append(('ellipsis_repeat', box_a, box_b, label_a, label_b))
+
+    def arrow_fanout_labeled(self, src: BoxRef,
+                              destinations_with_labels: list) -> None:
+        """
+        라벨 붙은 다중 화살표 (fan-out with labels).
+        1개 박스에서 N개 목적지로 각기 다른 라벨로 분기.
+        destinations_with_labels: [(dst_box, label), ...]
+
+        T-junction 없이 src 하단을 N등분한 출발점 사용 (split_from_box 방식).
+
+        사용:
+            d.arrow_fanout_labeled(router, [
+                (client1, 'TCP/IP'),
+                (client2, 'UDP'),
+                (client3, 'HTTP'),
+            ])
+        """
+        self._cmds.append(('arrow_fanout_labeled', src, destinations_with_labels))
+
     def autocloud(self, cx, cy, text="", fs=None, pad_x=0.55, pad_y=0.45,
                   max_w=None) -> BoxRef:
         """
@@ -1632,7 +1723,7 @@ class Drawing:
                         color=BOX_EDGE, lw=LW_ARR, linestyle=ls,
                         solid_capstyle='round', zorder=Z_ARROW)
 
-        # Pass 2b: cloud / iot_stack / brace / ref_callout 렌더링
+        # Pass 2b: cloud / iot_stack / brace / ref_callout / new patterns 렌더링
         import numpy as np
         from matplotlib.patches import Circle, Polygon, FancyArrowPatch
         for cmd in self._cmds:
@@ -1651,6 +1742,24 @@ class Drawing:
             elif cmd[0] == 'ref_callout_bus':
                 _, bus_x, ref_num, side, fs = cmd
                 self._render_ref_callout_bus(ax, bus_x, ref_num, side, fs)
+            elif cmd[0] == 'database_cylinder':
+                _, cx, cy, w, h, text, fs, b = cmd
+                self._render_database_cylinder(ax, cx, cy, w, h, text, fs)
+            elif cmd[0] == 'oval':
+                _, cx, cy, w, h, text, fs, b = cmd
+                self._render_oval(ax, cx, cy, w, h, text, fs)
+            elif cmd[0] == 'arrow_wireless':
+                _, box_a, box_b, label = cmd
+                self._render_arrow_wireless(ax, box_a, box_b, label)
+            elif cmd[0] == 'wireless_signal':
+                _, x, y, direction, n_arcs, scale = cmd
+                self._render_wireless_signal(ax, x, y, direction, n_arcs, scale)
+            elif cmd[0] == 'ellipsis_repeat':
+                _, box_a, box_b, label_a, label_b = cmd
+                self._render_ellipsis_repeat(ax, box_a, box_b, label_a, label_b)
+            elif cmd[0] == 'arrow_fanout_labeled':
+                _, src, destinations_with_labels = cmd
+                self._render_arrow_fanout_labeled(ax, src, destinations_with_labels)
 
         # Pass 3: 박스 white fill
         for cmd in self._cmds:
@@ -2082,6 +2191,271 @@ class Drawing:
                 ax.text(mid_x, tip_y - 0.08, label,
                         ha='center', va='top',
                         fontsize=fs, fontweight=FW, zorder=Z_SEC_LABEL)
+
+    # ── 신규 패턴 렌더 (learn/new-shapes) ────────────────────────────────────
+
+    def _render_database_cylinder(self, ax, cx, cy, w, h, text, fs):
+        """실린더형 DB 도형 렌더링.
+        구조: 상단 타원 + 직사각형 몸체 + 하단 타원 (반쪽만 visible).
+        """
+        import numpy as np
+        ry = h * 0.15   # 타원 세로 반축 (전체 높이의 15%)
+        rx = w / 2
+
+        body_top    = cy + h / 2 - ry
+        body_bottom = cy - h / 2 + ry
+
+        # ① 직사각형 몸체 (흰 fill → border)
+        ax.fill([cx-rx, cx+rx, cx+rx, cx-rx],
+                [body_bottom, body_bottom, body_top, body_top],
+                color=BOX_FILL, zorder=Z_BOX_FILL)
+        ax.plot([cx-rx, cx-rx], [body_bottom, body_top],
+                color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE)
+        ax.plot([cx+rx, cx+rx], [body_bottom, body_top],
+                color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE)
+
+        # ② 상단 타원 (완전 타원)
+        theta = np.linspace(0, 2*np.pi, 100)
+        ex = cx + rx * np.cos(theta)
+        ey = body_top + ry * np.sin(theta)
+        ax.fill(ex, ey, color=BOX_FILL, zorder=Z_BOX_FILL + 1)
+        ax.plot(ex, ey, color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE + 1)
+
+        # ③ 하단 타원 — 아랫쪽 반호만 표시 (반원 arc, 위쪽은 몸체로 가려짐)
+        theta_bot = np.linspace(np.pi, 2*np.pi, 60)
+        bex = cx + rx * np.cos(theta_bot)
+        bey = body_bottom + ry * np.sin(theta_bot)
+        ax.plot(bex, bey, color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE)
+
+        # ④ 텍스트 (몸체 중앙)
+        if text:
+            text_cy = (body_top + body_bottom) / 2
+            fs_use = self._fit_font(text, w - 0.18, (body_top - body_bottom) - 0.10, fs)
+            ax.text(cx, text_cy, text,
+                    ha='center', va='center',
+                    fontsize=fs_use, fontweight=FW,
+                    multialignment='center', zorder=Z_BOX_TEXT)
+
+    def _render_oval(self, ax, cx, cy, w, h, text, fs):
+        """타원형 프로세서 노드 렌더링 (matplotlib Ellipse 패치)."""
+        from matplotlib.patches import Ellipse
+        # 흰 fill
+        ax.add_patch(Ellipse((cx, cy), w, h,
+                             facecolor=BOX_FILL, edgecolor='none',
+                             linewidth=0, zorder=Z_BOX_FILL))
+        # 테두리
+        ax.add_patch(Ellipse((cx, cy), w, h,
+                             facecolor='none', edgecolor=BOX_EDGE,
+                             linewidth=LW_BOX, zorder=Z_BOX_EDGE))
+        # 텍스트 (내접 사각형 기준 90% 폭)
+        if text:
+            fs_use = self._fit_font(text, w * 0.80, h * 0.70, fs)
+            ax.text(cx, cy, text,
+                    ha='center', va='center',
+                    fontsize=fs_use, fontweight=FW,
+                    multialignment='center', zorder=Z_BOX_TEXT)
+
+    def _render_arrow_wireless(self, ax, box_a: BoxRef, box_b: BoxRef, label: str):
+        """지그재그 무선 연결선 렌더링.
+        직선 경로 위에 지그재그(sinusoidal) 패턴을 겹쳐서 무선 채널 표현.
+        마지막 세그먼트에 화살촉 추가.
+        """
+        import numpy as np
+
+        # 두 박스의 가장 가까운 edge 좌표 계산
+        # box_a → box_b 방향으로 edge 선택
+        if abs(box_a.cx - box_b.cx) > abs(box_a.cy - box_b.cy):
+            # 수평 주도
+            if box_b.cx > box_a.cx:
+                sx, sy = box_a.right_mid()
+                ex, ey = box_b.left_mid()
+            else:
+                sx, sy = box_a.left_mid()
+                ex, ey = box_b.right_mid()
+        else:
+            # 수직 주도
+            if box_b.cy < box_a.cy:
+                sx, sy = box_a.bot_mid()
+                ex, ey = box_b.top_mid()
+            else:
+                sx, sy = box_a.top_mid()
+                ex, ey = box_b.bot_mid()
+
+        # 경로 벡터
+        dx = ex - sx
+        dy = ey - sy
+        length = math.sqrt(dx*dx + dy*dy)
+        if length < 1e-6:
+            return
+        ux, uy = dx / length, dy / length        # 단위 벡터 (경로 방향)
+        nx, ny = -uy, ux                          # 법선 벡터 (지그재그 방향)
+
+        # 지그재그 파라미터
+        n_pts = 80
+        t = np.linspace(0, 1, n_pts)
+        # 양 끝 10% 구간은 직선, 중간은 지그재그
+        amp_envelope = np.clip(np.minimum(t, 1.0 - t) / 0.10, 0.0, 1.0)
+        ZIG_FREQ = 8      # 지그재그 주파수 (왕복 횟수)
+        ZIG_AMP  = 0.06   # 지그재그 진폭 (인치)
+        zz = ZIG_AMP * amp_envelope * np.sign(np.sin(ZIG_FREQ * 2 * np.pi * t))
+
+        wx = sx + t * dx + zz * nx
+        wy = sy + t * dy + zz * ny
+
+        # 지그재그 선 그리기
+        ax.plot(wx, wy, color=BOX_EDGE, lw=LW_ARR,
+                solid_capstyle='round', zorder=Z_ARROW)
+
+        # 화살촉 (끝점 방향으로)
+        ax.annotate('', xy=(ex, ey), xytext=(wx[-5], wy[-5]),
+                    arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                                   lw=LW_ARR, mutation_scale=12),
+                    zorder=Z_ARROWHEAD)
+
+        # 라벨 (경로 중앙, 법선 방향으로 0.15" 오프셋)
+        if label:
+            mid = n_pts // 2
+            mx, my = wx[mid], wy[mid]
+            ax.text(mx + nx * 0.15, my + ny * 0.15, label,
+                    ha='center', va='center',
+                    fontsize=FS_BODY, fontweight=FW,
+                    bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+
+    def _render_wireless_signal(self, ax, x, y, direction, n_arcs, scale):
+        """))) 동심원 방사 아이콘 렌더링.
+        direction: 'right'→))) , 'left'→((( , 'up'→^^^ , 'down'→vvv
+        """
+        import numpy as np
+        # 방향별 호 각도 범위 (시작, 끝)
+        DIR_ANGLES = {
+            'right': (-60,  60),
+            'left':  (120, 240),
+            'up':    ( 30, 150),
+            'down':  (210, 330),
+        }
+        a_start, a_end = DIR_ANGLES.get(direction, (-60, 60))
+        theta = np.linspace(np.radians(a_start), np.radians(a_end), 60)
+
+        for i in range(1, n_arcs + 1):
+            r = scale * i
+            ax.plot(x + r * np.cos(theta),
+                    y + r * np.sin(theta),
+                    color=BOX_EDGE, lw=LW_ARR * 0.9,
+                    solid_capstyle='round', zorder=Z_ARROW)
+
+    def _render_ellipsis_repeat(self, ax, box_a: BoxRef, box_b: BoxRef,
+                                 label_a: str, label_b: str):
+        """A...N 반복 표현 렌더링.
+        두 박스 중간에 '...' 텍스트와 라벨을 배치.
+        박스 간 연결은 점선으로 표현.
+        """
+        import numpy as np
+
+        # 두 박스의 가장 가까운 edge 사이 중간점 계산
+        if abs(box_a.cx - box_b.cx) > abs(box_a.cy - box_b.cy):
+            # 수평 배치
+            if box_b.cx > box_a.cx:
+                sx, sy = box_a.right_mid()
+                ex, ey = box_b.left_mid()
+            else:
+                sx, sy = box_a.left_mid()
+                ex, ey = box_b.right_mid()
+            is_horiz = True
+        else:
+            # 수직 배치
+            if box_b.cy < box_a.cy:
+                sx, sy = box_a.bot_mid()
+                ex, ey = box_b.top_mid()
+            else:
+                sx, sy = box_a.top_mid()
+                ex, ey = box_b.bot_mid()
+            is_horiz = False
+
+        mx = (sx + ex) / 2
+        my = (sy + ey) / 2
+
+        # 점선 연결 (박스 a→중간 절반, 중간→박스 b 절반)
+        GAP = 0.15  # '...' 텍스트 양쪽 여백
+        if is_horiz:
+            ax.plot([sx, mx - GAP], [sy, my], color=BOX_EDGE, lw=LW_ARR,
+                    linestyle='--', solid_capstyle='butt', zorder=Z_ARROW)
+            ax.plot([mx + GAP, ex], [my, ey], color=BOX_EDGE, lw=LW_ARR,
+                    linestyle='--', solid_capstyle='butt', zorder=Z_ARROW)
+            # '...' 텍스트
+            ax.text(mx, my, '...', ha='center', va='center',
+                    fontsize=FS_BODY + 2, fontweight='bold', zorder=Z_ARR_LABEL)
+            # 라벨 위쪽에 표시
+            ax.text(sx + (mx-sx)*0.3, sy + 0.15, label_a,
+                    ha='center', va='bottom',
+                    fontsize=FS_BODY, fontweight=FW,
+                    bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+            ax.text(ex - (ex-mx)*0.3, ey + 0.15, label_b,
+                    ha='center', va='bottom',
+                    fontsize=FS_BODY, fontweight=FW,
+                    bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+        else:
+            ax.plot([sx, mx], [sy, my - GAP], color=BOX_EDGE, lw=LW_ARR,
+                    linestyle='--', solid_capstyle='butt', zorder=Z_ARROW)
+            ax.plot([mx, ex], [my + GAP, ey], color=BOX_EDGE, lw=LW_ARR,
+                    linestyle='--', solid_capstyle='butt', zorder=Z_ARROW)
+            ax.text(mx, my, '...', ha='center', va='center',
+                    fontsize=FS_BODY + 2, fontweight='bold', zorder=Z_ARR_LABEL)
+            ax.text(sx + 0.18, (sy + my) / 2, label_a,
+                    ha='left', va='center',
+                    fontsize=FS_BODY, fontweight=FW,
+                    bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+            ax.text(ex + 0.18, (my + ey) / 2, label_b,
+                    ha='left', va='center',
+                    fontsize=FS_BODY, fontweight=FW,
+                    bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+
+    def _render_arrow_fanout_labeled(self, ax, src: BoxRef,
+                                      destinations_with_labels: list):
+        """라벨 붙은 다중 화살표 렌더링.
+        src 하단을 N등분 → 각 목적지까지 꺾인 화살표 + 라벨.
+        """
+        n = len(destinations_with_labels)
+        if n == 0:
+            return
+
+        # src 하단 N+1 등분점 계산 (T-junction 방지)
+        step = src.w / (n + 1)
+        start_xs = [src.left + step * (i + 1) for i in range(n)]
+
+        # via_y: 모든 목적지 top 중 최대 + 0.20"
+        all_tops = [dst.top for dst, _ in destinations_with_labels]
+        via_y = max(all_tops) + 0.20
+
+        for i, ((dst, lbl), sx) in enumerate(zip(destinations_with_labels, start_xs)):
+            src_pt = (sx, src.bot)
+            dst_pt = dst.top_mid()
+
+            if abs(sx - dst.cx) < 0.01:
+                # 수직 직선
+                pts = [src_pt, dst_pt]
+            else:
+                pts = [src_pt, (sx, via_y), (dst.cx, via_y), dst_pt]
+
+            # 경로 렌더링
+            for k in range(len(pts) - 2):
+                ax.plot([pts[k][0], pts[k+1][0]],
+                        [pts[k][1], pts[k+1][1]],
+                        color=BOX_EDGE, lw=LW_ARR,
+                        solid_capstyle='butt', zorder=Z_ARROW)
+            # 마지막 세그먼트 → 화살촉
+            ax.annotate('', xy=pts[-1], xytext=pts[-2],
+                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                                       lw=LW_ARR, mutation_scale=12),
+                        zorder=Z_ARROWHEAD)
+
+            # 라벨: via_y 아래 수직 구간 (또는 수평 구간)에 배치
+            if lbl and len(pts) >= 3:
+                # 수평 구간(via_y 구간) 중간에 배치
+                seg_mx = (pts[1][0] + pts[2][0]) / 2 if len(pts) >= 4 else pts[-1][0]
+                ax.text(seg_mx, via_y + 0.10, lbl,
+                        ha='center', va='bottom',
+                        fontsize=FS_BODY, fontweight=FW,
+                        bbox=LABEL_BG, zorder=Z_ARR_LABEL)
 
     # ── 내부 렌더 ─────────────────────────────────────────────────────────────
 

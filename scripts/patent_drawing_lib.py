@@ -1215,8 +1215,6 @@ class Drawing:
                 cy = b.cy
                 b.h = max_h
                 b.y = cy - max_h / 2
-                b.top = b.y + max_h
-                b.bot = b.y
         return max_h
 
     def equalize_widths(self, boxes: list) -> float:
@@ -1230,8 +1228,6 @@ class Drawing:
                 cx = b.cx
                 b.w = max_w
                 b.x = cx - max_w / 2
-                b.left = b.x
-                b.right = b.x + max_w
         return max_w
 
     def fig_label(self, y=None):

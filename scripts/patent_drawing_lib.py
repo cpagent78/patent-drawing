@@ -1123,6 +1123,23 @@ class Drawing:
             if cmd[0] == 'boundary' and not cmd[6]:  # is_page=False → layer
                 min_left  = min(min_left, cmd[1])
                 max_right = max(max_right, cmd[3])
+
+        # callout/label 예상 폭 반영 (렌더링 전이라 실측 불가 → 예상치)
+        CALLOUT_EST = 0.35  # callout 텍스트 + 물결선 예상 폭
+        for cmd in self._cmds:
+            if cmd[0] == 'ref_callout':
+                _, box, ref_num, side_enc, offset, fs = cmd
+                base_side = side_enc.split(':')[0]
+                if 'left' in base_side:
+                    min_left = min(min_left, box.left - CALLOUT_EST)
+                elif 'right' in base_side:
+                    max_right = max(max_right, box.right + CALLOUT_EST)
+            elif cmd[0] == 'ref_callout_bus':
+                _, bus_x, ref_num, side, fs = cmd
+                if side == 'right':
+                    max_right = max(max_right, bus_x + CALLOUT_EST + 0.30)
+                else:
+                    min_left = min(min_left, bus_x - CALLOUT_EST - 0.30)
         content_cx = (min_left + max_right) / 2
         page_cx = PAGE_W / 2
         dx = page_cx - content_cx
@@ -1750,9 +1767,10 @@ class Drawing:
         return {'actors': actor_boxes, 'lifeline_y_bottom': lifeline_bottom}
 
     def swimlane_columns(self, lanes: list, rows: list,
+                         connections=None,
                          x_start=0.50, y_top=10.20,
                          lane_w=None, header_h=0.50,
-                         row_h=0.70, row_gap=0.25,
+                         row_h=0.65, row_gap=0.95,
                          fs=None) -> dict:
         """
         수직 스윔레인 (Vertical Swimlane) — 역할별 레인 + 프로세스 박스.
@@ -1810,18 +1828,64 @@ class Drawing:
 
         # 3. 단계 박스 배치
         step_boxes = []
-        # 각 레인별 현재 y 위치 추적
-        lane_y = [y_top - header_h - row_gap for _ in range(n_lanes)]
+        # 3. 박스 배치 — 같은 시점 박스는 같은 y행에 나란히
+        # connections에서 연결된 src→dst 쌍을 보고, dst가 이전 행과 같은 y에 올 수 있으면 같은 행
+        cur_y = y_top - header_h - row_gap
+        ARR_GAP = 0.50  # 행 간 화살표 공간 (반으로 줄임)
 
         for row in rows:
             li = row.get('lane', 0)
             text = row.get('text', '')
             box_w = lane_w - 0.30
             box_x = x_start + li * lane_w + 0.15
-            box_y = lane_y[li] - row_h
+            box_y = cur_y - row_h
             b = self.box(box_x, box_y, box_w, row_h, text, fs)
             step_boxes.append(b)
-            lane_y[li] = box_y - row_gap
+            cur_y = box_y - ARR_GAP
+
+        # 4. connections 화살표
+        if connections:
+            for conn in connections:
+                src_idx = conn[0]
+                dst_idx = conn[1]
+                ls = conn[2] if len(conn) > 2 else '-'
+                src_box = step_boxes[src_idx]
+                dst_box = step_boxes[dst_idx]
+
+                same_lane = abs(src_box.cx - dst_box.cx) < 0.1
+                adjacent = abs(src_idx - dst_idx) == 1
+
+                if same_lane and adjacent:
+                    # 같은 레인 인접: 수직 화살표
+                    self.arrow_v(src_box, dst_box)
+                elif same_lane:
+                    # 같은 레인 비인접: 수직 (중간 박스 피해서)
+                    self.arrow_v(src_box, dst_box)
+                else:
+                    # 다른 레인: 옆면 수평 연결 (공간 절약)
+                    # src와 dst가 같은 y행이면 직접 수평
+                    if abs(src_box.cy - dst_box.cy) < row_h:
+                        if dst_box.cx > src_box.cx:
+                            self.arrow_route([src_box.right_mid(), dst_box.left_mid()], ls=ls)
+                        else:
+                            self.arrow_route([src_box.left_mid(), dst_box.right_mid()], ls=ls)
+                    else:
+                        # src 아래 → 중간 y → dst 레인 → dst 위
+                        mid_y = dst_box.top + 0.25
+                        if dst_box.cx > src_box.cx:
+                            self.arrow_route([
+                                src_box.bot_mid(),
+                                ('down_to', mid_y),
+                                ('right_to', dst_box.cx),
+                                dst_box.top_mid(),
+                            ], ls=ls)
+                        else:
+                            self.arrow_route([
+                                src_box.bot_mid(),
+                                ('down_to', mid_y),
+                                ('left_to', dst_box.cx),
+                                dst_box.top_mid(),
+                            ], ls=ls)
 
         return {'lane_headers': header_boxes, 'step_boxes': step_boxes}
 

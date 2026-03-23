@@ -2746,10 +2746,14 @@ class Drawing:
         bey = body_bottom + ry * np.sin(theta_bot)
         ax.plot(bex, bey, color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE)
 
-        # ④ 텍스트 (몸체 중앙)
+        # ④ 텍스트 (몸체 중앙 — 상단 타원/하단 호 침범 방지)
         if text:
-            text_cy = (body_top + body_bottom) / 2
-            fs_use = self._fit_font(text, w - 0.18, (body_top - body_bottom) - 0.10, fs)
+            # 유효 텍스트 영역: 상단 타원 아래 + ry*0.3 ~ 하단 호 위 - ry*0.3
+            text_area_top = body_top - ry * 0.5
+            text_area_bot = body_bottom + ry * 0.5
+            text_cy = (text_area_top + text_area_bot) / 2
+            text_h = text_area_top - text_area_bot - 0.06
+            fs_use = self._fit_font(text, w - 0.22, max(text_h, 0.20), fs)
             ax.text(cx, text_cy, text,
                     ha='center', va='center',
                     fontsize=fs_use, fontweight=FW,

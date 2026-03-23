@@ -23,6 +23,79 @@
 | **크기 보장** | box() 자동 확장, container 폭 제한, equalize_heights/widths() |
 | **Edge 자동 감지** | arrow_h/v/bidir 위치 기반 자동 선택 |
 
+### Core 도형 (Shapes)
+모든 패턴에서 사용하는 기본 빌딩블록.
+
+| 도형 | 메서드 | 반환 | 설명 |
+|------|--------|------|------|
+| 직사각형 | `box()`, `autobox()` | BoxRef | 기본 블록. autobox는 텍스트 실측 자동 크기 |
+| 구름 | `cloud()`, `autocloud()` | CloudRef | 타원 기반, 화살표 침범 방지 |
+| IoT 스택 | `iot_stack()` | BoxRef | n개 사각형 비스듬히 겹침 |
+| 실린더 DB | `database_cylinder()` | BoxRef | 상단 타원 + 몸체 |
+| 타원 | `oval()` | BoxRef | 프로세서/처리 노드 |
+| 둥근 사각형 | `rounded_rect()` | BoxRef | 플로우차트 터미네이터 |
+
+### Core 화살표/연결선 (Arrows & Lines)
+
+| 종류 | 메서드 | 설명 |
+|------|--------|------|
+| 수직 단방향 | `arrow_v(src, dst)` | 위치 자동 감지 |
+| 수평 단방향 | `arrow_h(src, dst)` | 위치 자동 감지 |
+| 양방향 수평/수직 | `arrow_bidir(a, b, side)` | 위치 자동 감지 |
+| 꺾인 단방향 | `arrow_route(steps)` | elbow 화살표 |
+| 꺾인 양방향 | `arrow_bidir_route(steps)` | elbow 양방향 |
+| 대각선 단방향 | `arrow_diagonal(a, b)` | rect_edge 교차점 |
+| 대각선 양방향 | `arrow_diagonal_bidir(a, b)` | rect_edge 교차점 |
+| 양방향 fork | `arrow_fork_bidir(src, dsts)` | 1→N 분기 |
+| Cloud 통과 | `arrow_to_cloud_child(ext, cloud, internal)` | Cloud 내부 도형 연결 |
+| 무선 지그재그 | `arrow_wireless(a, b, label)` | sine wave + 화살촉 |
+| 화살촉 없는 선 | `line(x1,y1,x2,y2,ls)` | 버스선, 구분선 등 |
+
+### Core 선 스타일 (Line Styles)
+
+| 스타일 | 값 | 용도 |
+|--------|---|------|
+| 실선 | `'-'` | 기본 연결 |
+| 대시 | `'--'` | boundary, 무선 |
+| dash-dot | `(0,(3,2,1,2))` | 내부 layer |
+| 점선 | `':'` | lifeline |
+
+### Core 라벨/참조번호 (Labels & Callouts)
+
+| 종류 | 메서드 | 설명 |
+|------|--------|------|
+| 독립 라벨 | `label(x,y,text)` | 설명용 텍스트 |
+| callout (물결) | `ref_callout(box,num,style='tilde')` | sine wave leader |
+| callout (곡선) | `ref_callout(box,num,style='curve')` | 베지에 leader |
+| 버스 callout | `ref_callout_bus(bus_x,num)` | 빈 공간 자동 탐색 |
+| 반복 표현 | `ellipsis_repeat(a,b,lbl_a,lbl_b)` | A...N 패턴 |
+| 다중 화살표 | `arrow_fanout_labeled(src,dsts)` | 라벨 붙은 fan-out |
+
+### Core 무선/신호 (Wireless & Signal)
+
+| 종류 | 메서드 | 설명 |
+|------|--------|------|
+| 신호 방사 | `wireless_signal(x,y,dir)` | `)))` 동심 호 |
+
+### Core 컨테이너 (Containers)
+
+| 종류 | 메서드 | 설명 |
+|------|--------|------|
+| 페이지 경계 | `boundary(x1,y1,x2,y2,label)` | 외곽 점선 (대시) |
+| 내부 레이어 | `layer(x1,y1,x2,y2,label,dash)` | dash-dot (외곽과 구분) |
+| 중괄호 | `brace(x1,y1,x2,y2,side,label)` | 그룹 표시 |
+
+### Core 유틸리티 (Utilities)
+
+| 기능 | 메서드 | 설명 |
+|------|--------|------|
+| 텍스트 측정 | `measure_text(text,fs)` | 렌더링 크기 실측 |
+| 너비 통일 | `equalize_widths(boxes)` | 그룹 내 균일화 |
+| 높이 통일 | `equalize_heights(boxes)` | 그룹 내 균일화 |
+| FIG 라벨 | `fig_label(y)` | 하단 자동 배치 |
+
+---
+
 ### Pattern (확장)
 Core 기능을 조합하여 만든 도면 유형별 템플릿.
 

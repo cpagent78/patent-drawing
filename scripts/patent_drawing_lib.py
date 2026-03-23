@@ -2746,14 +2746,11 @@ class Drawing:
         bey = body_bottom + ry * np.sin(theta_bot)
         ax.plot(bex, bey, color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE)
 
-        # ④ 텍스트 (몸체 중앙 — 상단 타원/하단 호 침범 방지)
+        # ④ 텍스트 — _get_text_rect()로 유효 영역 자동 계산
         if text:
-            # 유효 텍스트 영역: 상단 타원 아래 + ry*0.3 ~ 하단 호 위 - ry*0.3
-            text_area_top = body_top - ry * 0.5
-            text_area_bot = body_bottom + ry * 0.5
-            text_cy = (text_area_top + text_area_bot) / 2
-            text_h = text_area_top - text_area_bot - 0.06
-            fs_use = self._fit_font(text, w - 0.22, max(text_h, 0.20), fs)
+            tw, th, dx_off, dy_off = self._get_text_rect('cylinder', w, h)
+            text_cy = cy + dy_off
+            fs_use = self._fit_font(text, tw, max(th, 0.20), fs)
             ax.text(cx, text_cy, text,
                     ha='center', va='center',
                     fontsize=fs_use, fontweight=FW,
@@ -3095,6 +3092,28 @@ class Drawing:
             if abs(p[0]-deduped[-1][0]) > 1e-4 or abs(p[1]-deduped[-1][1]) > 1e-4:
                 deduped.append(p)
         return deduped
+
+    def _get_text_rect(self, shape_type, w, h):
+        """도형 내부 유효 텍스트 영역(내접 직사각형) 반환.
+        모든 도형의 텍스트 배치가 이 메서드를 통해 통일됨.
+        반환: (text_w, text_h, text_cx_offset, text_cy_offset)
+              offset은 도형 중심 대비 텍스트 중심 이동량.
+        """
+        if shape_type == 'cylinder':
+            ry = h * 0.15
+            body_h = h - ry * 2      # 몸체 높이
+            text_h = body_h - ry     # 상하 타원 여백
+            # 텍스트 중심을 몸체 중앙으로 (상단 타원이 위로 돌출하므로 약간 아래)
+            cy_offset = -ry * 0.3
+            return w - 0.22, text_h, 0, cy_offset
+        elif shape_type == 'cloud':
+            return w * 0.65, h * 0.50, 0, 0
+        elif shape_type == 'oval':
+            return w * 0.70, h * 0.70, 0, 0
+        elif shape_type == 'rounded_rect':
+            return w - 0.20, h - 0.15, 0, 0
+        else:  # box (기본)
+            return w - 0.18, h - 0.14, 0, 0
 
     def _fit_font(self, text, box_w_in, box_h_in, fs_start):
         """박스 크기에 맞게 폰트 자동 축소. 최소 8pt."""

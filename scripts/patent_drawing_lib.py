@@ -1988,6 +1988,7 @@ class Drawing:
         return b
 
     def numbered_sequence_arrows(self, steps: list,
+                                  connections=None,
                                   x_start=1.00, y_top=9.00,
                                   x_gap=2.20, y_gap=1.00,
                                   node_r=0.35, fs=None,
@@ -2055,14 +2056,23 @@ class Drawing:
             num_y = cy + oval_h / 2 + 0.08
             self._cmds.append(('label', num_x, num_y, num, 'right', fs))
 
-        # 화살표 연결 (sequential)
-        for i in range(len(ovals) - 1):
-            src = ovals[i]
-            dst = ovals[i + 1]
-            if direction == 'TB':
-                self.arrow_route([src.bot_mid(), dst.top_mid()])
-            else:
-                self.arrow_route([src.right_mid(), dst.left_mid()])
+        # 화살표 연결
+        if connections:
+            # 명시적 연결 (분기/역방향 지원)
+            for conn in connections:
+                src_idx, dst_idx = conn[0], conn[1]
+                ls = conn[2] if len(conn) > 2 else '-'
+                src, dst = ovals[src_idx], ovals[dst_idx]
+                self.arrow_diagonal(src, dst)
+        else:
+            # 기본: 순차 연결
+            for i in range(len(ovals) - 1):
+                src = ovals[i]
+                dst = ovals[i + 1]
+                if direction == 'TB':
+                    self.arrow_route([src.bot_mid(), dst.top_mid()])
+                else:
+                    self.arrow_route([src.right_mid(), dst.left_mid()])
 
         # 마지막 노드는 의도적 terminal (dead-end 경고 스킵)
         if ovals:

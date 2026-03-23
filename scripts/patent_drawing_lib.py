@@ -1943,13 +1943,13 @@ class Drawing:
             # next_w는 다음 박스 실제폭을 모르므로 stage_w 사용 (auto-expand로 cx 보정됨)
             cur_cx = b.right + stage_gap + stage_w / 2
 
-        # 화살표 연결: 실제 박스 edge 기반 (stage→stage) + 라벨
+        # 화살표 연결 + 라벨 (화살표 중앙에 배치)
         for i in range(len(boxes) - 1):
             src = boxes[i]
             dst = boxes[i + 1]
             lbl = labels[i] if labels and i < len(labels) else ''
             self._cmds.append(('route', [src.right_mid(), dst.left_mid()],
-                               lbl, None, (0.05, 'center')))
+                               lbl, 0, (0.12, 'center')))
 
         # 마지막 박스는 의도적 terminal (dead-end 경고 스킵)
         if boxes:

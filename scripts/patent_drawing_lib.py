@@ -288,23 +288,31 @@ class Drawing:
 
     MIN_BND_PAD = 0.30
 
-    def __init__(self, filename, fig_num="1", dpi=150):
+    def __init__(self, filename, fig_num="1", dpi=150, orientation='portrait'):
+        """
+        orientation: 'portrait' (기본, 8.5x11) 또는 'landscape' (11x8.5)
+        """
         self.filename  = filename
         self.fig_num   = fig_num
         self.dpi       = dpi
+        self.orientation = orientation
         self._cmds     = []
         self._box_refs = []
-        self._box_text_sizes = {}  # id(BoxRef) → (tw_in, th_in) 실측 텍스트 크기
-        self._label_extents  = []  # 독립 라벨 실측 범위 [{x0,x1,y0,y1,text}]
-        self._no_ref_boxes   = set()  # id(BoxRef) → validate ref 검사 스킵
-        self._terminal_boxes = set()  # id(BoxRef) → dead-end 검사 스킵 (의도적 terminal)
-        # Graph-first API
+        self._box_text_sizes = {}
+        self._label_extents  = []
+        self._no_ref_boxes   = set()
+        self._terminal_boxes = set()
         self._nodes: list['NodeDef'] = []
-        self._edges: list[tuple] = []  # (src_NodeDef, dst_NodeDef, label)
+        self._edges: list[tuple] = []
 
-        self.fig, self.ax = plt.subplots(figsize=(PAGE_W, PAGE_H))
-        self.ax.set_xlim(0, PAGE_W)
-        self.ax.set_ylim(0, PAGE_H)
+        if orientation == 'landscape':
+            self.page_w, self.page_h = PAGE_H, PAGE_W  # 11.0 x 8.5
+        else:
+            self.page_w, self.page_h = PAGE_W, PAGE_H  # 8.5 x 11.0
+
+        self.fig, self.ax = plt.subplots(figsize=(self.page_w, self.page_h))
+        self.ax.set_xlim(0, self.page_w)
+        self.ax.set_ylim(0, self.page_h)
         self.ax.axis('off')
         self.fig.patch.set_facecolor('white')
         self.ax.set_facecolor('white')
@@ -1126,7 +1134,7 @@ class Drawing:
 
         # callout 추측 제거 — save() 2-pass에서 실측 기반으로 처리
         content_cx = (min_left + max_right) / 2
-        page_cx = PAGE_W / 2
+        page_cx = self.page_w / 2
         dx = page_cx - content_cx
 
         if abs(dx) < 0.01:
@@ -2098,7 +2106,7 @@ class Drawing:
         # 1차 렌더링 후 전체 콘텐츠+boundary 실측 → 페이지 중앙으로
         if bnd_rect and (self._box_refs or self._label_extents):
             bx1, by1, bx2, by2 = bnd_rect
-            page_cx = PAGE_W / 2
+            page_cx = self.page_w / 2
 
             # 모든 요소(box + callout + label + boundary)의 실측 좌우 범위
             all_lefts = [b.left for b in self._box_refs] + [bx1]
@@ -2149,8 +2157,8 @@ class Drawing:
 
                     # 2차 렌더링 (clear + redraw)
                     self.ax.clear()
-                    self.ax.set_xlim(0, PAGE_W)
-                    self.ax.set_ylim(0, PAGE_H)
+                    self.ax.set_xlim(0, self.page_w)
+                    self.ax.set_ylim(0, self.page_h)
                     self.ax.set_aspect('equal')
                     self.ax.axis('off')
                     bnd_rect = self._render_all()

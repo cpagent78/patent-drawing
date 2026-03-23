@@ -2862,7 +2862,7 @@ class Drawing:
 
         # 화살촉 (끝점 방향으로)
         ax.annotate('', xy=(ex, ey), xytext=(wx[-5], wy[-5]),
-                    arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                    arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
                                    lw=LW_ARR, mutation_scale=12),
                     zorder=Z_ARROWHEAD)
 
@@ -2998,7 +2998,7 @@ class Drawing:
                         solid_capstyle='butt', zorder=Z_ARROW)
             # 마지막 세그먼트 → 화살촉
             ax.annotate('', xy=pts[-1], xytext=pts[-2],
-                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
                                        lw=LW_ARR, mutation_scale=12),
                         zorder=Z_ARROWHEAD)
 
@@ -3017,7 +3017,7 @@ class Drawing:
         """양방향 화살촉 (직선 또는 elbow)."""
         if len(pts) == 2:
             ax.annotate('', xy=pts[1], xytext=pts[0],
-                        arrowprops=dict(arrowstyle='<->', color=BOX_EDGE,
+                        arrowprops=dict(arrowstyle='<->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
                                        lw=LW_ARR, mutation_scale=12),
                         zorder=Z_ARROWHEAD)
         else:
@@ -3027,11 +3027,11 @@ class Drawing:
                         color=BOX_EDGE, lw=LW_ARR,
                         solid_capstyle='butt', zorder=Z_ARROW)
             ax.annotate('', xy=pts[0], xytext=pts[1],
-                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
                                        lw=LW_ARR, mutation_scale=12),
                         zorder=Z_ARROWHEAD)
             ax.annotate('', xy=pts[-1], xytext=pts[-2],
-                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
                                        lw=LW_ARR, mutation_scale=12),
                         zorder=Z_ARROWHEAD)
 
@@ -3058,7 +3058,7 @@ class Drawing:
                     color=BOX_EDGE, lw=LW_ARR, linestyle=ls,
                     solid_capstyle='round', zorder=Z_ARROW)
         ax.annotate('', xy=pts[-1], xytext=pts[-2],
-                    arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                    arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
                                    lw=LW_ARR, linestyle=ls, mutation_scale=12),
                     zorder=Z_ARROWHEAD)
         if lbl:

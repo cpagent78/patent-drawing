@@ -207,6 +207,47 @@ class PatentFigure:
             for nd in box_nodes:
                 nd._w = max_w
 
+        # ── Fix: scale down node sizes if total height exceeds available area ──
+        # Available vertical height for content
+        content_y_top = self.BND_Y2 - self.INNER_PAD
+        content_y_bot = self.BND_Y1 + self.INNER_PAD
+        available_h = content_y_top - content_y_bot
+
+        # Group by rank to count ranks (ranks not yet assigned — skip for now)
+        # This is called AFTER _assign_ranks, so ranks are set
+        from collections import defaultdict
+        ranks = defaultdict(list)
+        for nd in self._nodes.values():
+            ranks[nd.rank].append(nd)
+        max_rank = max(ranks.keys()) if ranks else 0
+
+        # Total min height: sum of row heights with min gap
+        MIN_GAP = 0.25
+        total_min_h = sum(max(nd._h for nd in ranks[r]) for r in range(max_rank + 1))
+        total_min_h += MIN_GAP * max_rank
+
+        if total_min_h > available_h:
+            # Scale factor: reduce box heights proportionally
+            scale = available_h / total_min_h * 0.92   # 8% extra margin
+            for nd in self._nodes.values():
+                nd._h *= scale
+                nd._h = max(nd._h, 0.35)  # absolute minimum 0.35"
+
+        # ── Fix: scale down node widths if wide rows exceed available width ──
+        content_x1 = self.BND_X1 + self.INNER_PAD + self.LOOPBACK_MARGIN
+        content_x2 = self.BND_X2 - self.INNER_PAD
+        available_w = content_x2 - content_x1
+
+        # Find the widest rank
+        for r, nodes in ranks.items():
+            if len(nodes) > 1:
+                total_row_w = sum(nd._w for nd in nodes) + self.H_GAP * (len(nodes) - 1)
+                if total_row_w > available_w:
+                    scale_w = available_w / total_row_w * 0.95
+                    for nd in nodes:
+                        nd._w *= scale_w
+                        nd._w = max(nd._w, 0.80)  # absolute minimum 0.80"
+
     # ── Step 3: Position calculation ──────────────────────────────────────────
 
     def _compute_positions(self) -> dict[str, tuple[float, float]]:
@@ -239,16 +280,37 @@ class PatentFigure:
             total_node_h += row_h
 
         # Dynamic V_GAP: fill available space evenly
+        # For branching flows, elbows need 2 × 0.44" = 0.88" between boxes
+        # to avoid "too short" validator warnings.
+        # Detect if this layout has branching (some ranks have > 1 node)
+        has_branching = any(len(ranks[r]) > 1 for r in range(max_rank + 1))
+        # For single-column linear flows, straight arrows only need 0.44"
+        # For branching, elbow arrows need 0.88" minimum
+        MIN_V_GAP = 0.92 if has_branching else 0.48
         n_gaps = max_rank  # gaps between ranks
         if n_gaps > 0:
-            v_gap = min(0.55, max(0.25, (available_h - total_node_h) / n_gaps))
+            remaining = available_h - total_node_h
+            if remaining <= 0:
+                # Space constrained (deep flow) — use computed scale-down gap
+                v_gap = max(0.20, remaining / n_gaps) if remaining > 0 else 0.20
+            elif remaining / n_gaps < MIN_V_GAP:
+                # Not enough space for ideal gap — compress to fit
+                v_gap = max(0.20, remaining / n_gaps)
+            else:
+                v_gap = min(0.90, max(MIN_V_GAP, remaining / n_gaps))
         else:
             v_gap = 0.55
 
         total_h = total_node_h + v_gap * n_gaps
 
-        # Start y (top of content, going down)
-        start_y = (content_y_top + content_y_bot) / 2 + total_h / 2
+        # Clamp total_h to available_h to prevent overflow
+        if total_h > available_h:
+            if n_gaps > 0:
+                v_gap = max(0.20, (available_h - total_node_h) / n_gaps)
+            total_h = total_node_h + v_gap * n_gaps
+
+        # Start y (top of content, going down) — clamped to boundary
+        start_y = min(content_y_top, (content_y_top + content_y_bot) / 2 + total_h / 2)
 
         positions = {}
         cur_y = start_y
@@ -308,6 +370,14 @@ class PatentFigure:
                 nd.box_ref = d.box(x, y, nd._w, nd._h, nd.text, fs=fs)
 
         # Draw forward edges (straight/elbow arrows)
+        # For skip-rank edges (rank diff > 1), route via side channel to avoid
+        # passing through intermediate boxes.
+        all_right_edges = max(
+            (nd.box_ref.right for nd in self._nodes.values() if nd.box_ref), 
+            default=self.BND_X2 - self.INNER_PAD
+        )
+        skip_channel_x = all_right_edges + 0.35  # right side channel for skip edges
+
         for e in self._edges:
             if e.is_back:
                 continue
@@ -319,39 +389,85 @@ class PatentFigure:
             if sb is None or db is None:
                 continue
 
-            # Same column: straight vertical arrow
-            if abs(sb.cx - db.cx) < 0.1:
+            rank_diff = dst_nd.rank - src_nd.rank
+
+            # Check if this edge skips over intermediate nodes
+            is_skip = rank_diff > 1
+
+            # Same column: straight vertical arrow (only if no intermediate boxes in path)
+            if abs(sb.cx - db.cx) < 0.1 and not is_skip:
                 d.arrow_v(sb, db)
+            elif is_skip:
+                # Skip-rank: route via right side channel to avoid crossing intermediate boxes
+                d.arrow_route([
+                    sb.right_mid(),
+                    ('right_to', skip_channel_x),
+                    ('up_to' if sb.cy < db.cy else 'down_to', db.cy),
+                    db.right_mid(),
+                ])
             else:
                 # Elbow: down from src, horizontal, down to dst
-                mid_y = (sb.bot + db.top) / 2
-                d.arrow_route([
-                    sb.bot_mid(),
-                    (sb.cx, mid_y),
-                    (db.cx, mid_y),
-                    db.top_mid(),
-                ])
+                if abs(src_nd.rank - dst_nd.rank) == 0:
+                    # Same-rank: horizontal exit from side (left or right) of src
+                    if db.cx < sb.cx:
+                        d.arrow_route([sb.left_mid(), db.right_mid()])
+                    else:
+                        d.arrow_route([sb.right_mid(), db.left_mid()])
+                elif abs(src_nd.rank - dst_nd.rank) == 1:
+                    # Adjacent rank: standard elbow — ensure minimum 0.44" segments
+                    # by using at least 0.44" below src and above dst
+                    mid_y = min(sb.bot - 0.44, max(db.top + 0.44, (sb.bot + db.top) / 2))
+                    d.arrow_route([
+                        sb.bot_mid(),
+                        (sb.cx, mid_y),
+                        (db.cx, mid_y),
+                        db.top_mid(),
+                    ])
+                else:
+                    # Multi-rank: handled by skip-rank logic above (shouldn't reach here)
+                    mid_y = (sb.bot + db.top) / 2
+                    d.arrow_route([
+                        sb.bot_mid(),
+                        (sb.cx, mid_y),
+                        (db.cx, mid_y),
+                        db.top_mid(),
+                    ])
 
             # Edge label (Yes/No)
             if e.label:
                 if src_nd.shape == 'diamond':
-                    if abs(sb.cx - db.cx) < 0.1:
+                    if abs(sb.cx - db.cx) < 0.1 and not is_skip:
+                        # Straight down label
                         d.label(sb.cx + 0.12, sb.bot - 0.08, e.label, ha='left', fs=fs)
+                    elif is_skip:
+                        d.label(skip_channel_x + 0.08, (sb.cy + db.cy) / 2, e.label, ha='left', fs=fs)
+                    elif abs(src_nd.rank - dst_nd.rank) == 0:
+                        # Same-rank side exit: label on diamond side
+                        if db.cx < sb.cx:
+                            d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=fs)
+                        else:
+                            d.label(sb.right + 0.08, sb.cy + 0.10, e.label, ha='left', fs=fs)
                     else:
+                        # Cross-rank elbow: label on diamond side at departure
                         if db.cx < sb.cx:
                             d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=fs)
                         else:
                             d.label(sb.right + 0.08, sb.cy + 0.10, e.label, ha='left', fs=fs)
                 else:
-                    mid_y = (sb.bot + db.top) / 2
-                    d.label(sb.cx + 0.12, mid_y, e.label, ha='left', fs=fs)
+                    if is_skip:
+                        d.label(skip_channel_x + 0.08, (sb.cy + db.cy) / 2, e.label, ha='left', fs=fs)
+                    else:
+                        mid_y = (sb.bot + db.top) / 2
+                        d.label(sb.cx + 0.12, mid_y, e.label, ha='left', fs=fs)
 
         # Draw back-edges (loop-back through left channel)
         back_edges = [e for e in self._edges if e.is_back]
         if back_edges:
-            # Find leftmost node boundary
+            # Find leftmost node boundary — boundary itself is the limit
             all_lefts = [nd.box_ref.left for nd in self._nodes.values() if nd.box_ref]
             base_x = min(all_lefts) if all_lefts else self.BND_X1 + self.INNER_PAD
+            # Clamp: channel must remain inside boundary (with margin)
+            min_channel_x = self.BND_X1 + 0.10
 
             for i, e in enumerate(back_edges):
                 src_nd = self._nodes[e.src_id]
@@ -362,19 +478,34 @@ class PatentFigure:
                 if sb is None or db is None:
                     continue
 
-                # Route: src left_mid → left → up → dst left_mid
-                channel_x = base_x - 0.45 - i * 0.30
+                # Route: src bottom-left corner → left channel → up → dst left_mid
+                # Use bottom-left of src box for departure (avoids overlapping label positions)
+                channel_x = max(min_channel_x, base_x - 0.40 - i * 0.28)
 
-                d.arrow_route([
-                    sb.left_mid(),
-                    ('left_to', channel_x),
-                    ('up_to', db.cy),
-                    db.left_mid(),
-                ])
+                # For diamonds, exit from the bottom (straight down first, then left)
+                # For boxes, exit from the left_mid
+                if src_nd.shape == 'diamond':
+                    d.arrow_route([
+                        sb.bot_mid(),
+                        (sb.cx, sb.bot - 0.20),
+                        ('left_to', channel_x),
+                        ('up_to', db.cy),
+                        db.left_mid(),
+                    ])
+                else:
+                    d.arrow_route([
+                        sb.left_mid(),
+                        ('left_to', channel_x),
+                        ('up_to', db.cy),
+                        db.left_mid(),
+                    ])
 
-                # Label at branch point
+                # Label: place it near the source departure, offset from channel
                 if e.label:
-                    d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=fs)
+                    if src_nd.shape == 'diamond':
+                        d.label(sb.cx - 0.12, sb.bot - 0.12, e.label, ha='right', fs=fs)
+                    else:
+                        d.label(channel_x - 0.08, sb.cy + 0.10, e.label, ha='right', fs=fs)
 
         # Boundary + label
         d.boundary(self.BND_X1, self.BND_Y1, self.BND_X2, self.BND_Y2)

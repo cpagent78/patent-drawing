@@ -1,8 +1,25 @@
 """
-patent_drawing_lib.py  v7.4
+patent_drawing_lib.py  v8.0
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
+  v8.0  learn/new-shapes 브랜치 — 5개 신규 패턴 추가:
+        - sequence_diagram(): UML 시퀀스 다이어그램 (행위자 박스 + lifeline + 메시지 화살표)
+        - swimlane_columns(): 수직 스윔레인 (레인 헤더 + 프로세스 박스)
+        - horizontal_pipeline_flow(): 수평 파이프라인 (스테이지 박스 + 화살표 자동 연결)
+          · x_start 파라미터 추가 (left edge 기반 배치, cx_start 대체)
+          · 실제 박스 폭 기반 간격 계산으로 화살표 too-short 방지
+        - rounded_rect(): 둥근 모서리 사각형 (flowchart terminator)
+        - numbered_sequence_arrows(): 번호 매긴 oval 노드 시퀀스
+          · 텍스트 실측 기반 oval 크기 자동 결정 (OVAL_USABLE_FACTOR=0.70)
+        validate 개선:
+        - _no_ref_boxes: sequence/swimlane 행위자 박스 ref 검사 스킵
+        - _terminal_boxes: pipeline/sequence 마지막 노드 dead-end 경고 스킵
+        - 마진 검사 MARGIN_EPS=0.005 추가 (float 오차 허용)
+        - horizontal padding 검사 PAD_EPS=0.005 추가
+        - 공간 낭비 검사에 line(lifeline) 끝점 포함
+        - rounded_rect 박스도 ref 검사 대상에 추가
+
   v3.0  라벨 겹침 원천 차단: 화살표 라벨을 선분 중간이 아닌
         박스-free 구간에 자동 배치. 박스 텍스트 w+h 동시 축소.
         zorder 체계 정비. 검증 강화.
@@ -279,6 +296,8 @@ class Drawing:
         self._box_refs = []
         self._box_text_sizes = {}  # id(BoxRef) → (tw_in, th_in) 실측 텍스트 크기
         self._label_extents  = []  # 독립 라벨 실측 범위 [{x0,x1,y0,y1,text}]
+        self._no_ref_boxes   = set()  # id(BoxRef) → validate ref 검사 스킵
+        self._terminal_boxes = set()  # id(BoxRef) → dead-end 검사 스킵 (의도적 terminal)
         # Graph-first API
         self._nodes: list['NodeDef'] = []
         self._edges: list[tuple] = []  # (src_NodeDef, dst_NodeDef, label)
@@ -1104,6 +1123,23 @@ class Drawing:
             if cmd[0] == 'boundary' and not cmd[6]:  # is_page=False → layer
                 min_left  = min(min_left, cmd[1])
                 max_right = max(max_right, cmd[3])
+
+        # callout/label 예상 폭 반영 (렌더링 전이라 실측 불가 → 예상치)
+        CALLOUT_EST = 0.35  # callout 텍스트 + 물결선 예상 폭
+        for cmd in self._cmds:
+            if cmd[0] == 'ref_callout':
+                _, box, ref_num, side_enc, offset, fs = cmd
+                base_side = side_enc.split(':')[0]
+                if 'left' in base_side:
+                    min_left = min(min_left, box.left - CALLOUT_EST)
+                elif 'right' in base_side:
+                    max_right = max(max_right, box.right + CALLOUT_EST)
+            elif cmd[0] == 'ref_callout_bus':
+                _, bus_x, ref_num, side, fs = cmd
+                if side == 'right':
+                    max_right = max(max_right, bus_x + CALLOUT_EST + 0.30)
+                else:
+                    min_left = min(min_left, bus_x - CALLOUT_EST - 0.30)
         content_cx = (min_left + max_right) / 2
         page_cx = PAGE_W / 2
         dx = page_cx - content_cx
@@ -1286,6 +1322,97 @@ class Drawing:
         self._box_refs.append(b)
         self._cmds.append(('cloud', cx, cy, w, h, text, fs or FS_BODY, b))
         return b
+
+    # ── 신규 패턴 (learn/new-shapes) ──────────────────────────────────────────
+
+    def database_cylinder(self, cx, cy, w, h, text="", fs=None) -> BoxRef:
+        """
+        실린더형 DB 도형 (특허 도면 표준 데이터 저장소).
+        직사각형 몸체 + 상단/하단 타원으로 구성.
+        반환: BoxRef(cx-w/2, cy-h/2, w, h) — box_refs에 등록됨.
+
+        사용:
+            db = d.database_cylinder(4.0, 5.5, 1.4, 1.0, '310\nDB')
+            d.arrow_v(box, db)
+        """
+        b = BoxRef(cx - w / 2, cy - h / 2, w, h)
+        self._box_refs.append(b)
+        self._cmds.append(('database_cylinder', cx, cy, w, h, text, fs or FS_BODY, b))
+        return b
+
+    def oval(self, cx, cy, w, h, text="", fs=None) -> BoxRef:
+        """
+        타원형 프로세서 노드 (터미널/단말/처리 노드).
+        특허 도면에서 시작/끝 단말(start/end terminal) 또는 CPU/처리 노드로 사용.
+        반환: BoxRef — edge_toward() 등 BoxRef 메서드 사용 가능.
+
+        사용:
+            cpu = d.oval(4.0, 6.5, 1.6, 0.7, '200\nCPU')
+            d.arrow_diagonal(cpu, db)  # or arrow_v, arrow_h
+        """
+        b = BoxRef(cx - w / 2, cy - h / 2, w, h)
+        self._box_refs.append(b)
+        self._cmds.append(('oval', cx, cy, w, h, text, fs or FS_BODY, b))
+        return b
+
+    def arrow_wireless(self, box_a: BoxRef, box_b: BoxRef, label="") -> None:
+        """
+        지그재그 무선 연결선 (wireless communication link).
+        두 박스 사이를 지그재그 패턴으로 연결하여 무선 채널을 표현.
+        label이 있으면 중간에 표시 (예: "802.11n").
+        연결 방향: box_a → box_b (단방향 화살촉).
+
+        사용:
+            d.arrow_wireless(ap, device, label='802.11n')
+        """
+        self._cmds.append(('arrow_wireless', box_a, box_b, label))
+
+    def wireless_signal(self, x, y, direction='right', n_arcs=3, scale=0.25) -> None:
+        """
+        ))) 동심원 방사 아이콘 — 안테나/무선 신호 방사 표현.
+        direction: 'right'(→), 'left'(←), 'up'(↑), 'down'(↓)
+        n_arcs: 호 개수 (기본 3)
+        scale: 호 크기 단위 (인치, 기본 0.25")
+
+        사용:
+            d.wireless_signal(5.0, 7.0, direction='right')   # )))
+            d.wireless_signal(3.0, 7.0, direction='left')    # (((
+        """
+        self._cmds.append(('wireless_signal', x, y, direction, n_arcs, scale))
+
+    def ellipsis_repeat(self, box_a: BoxRef, box_b: BoxRef,
+                        label_a="1", label_b="N") -> None:
+        """
+        A...N 반복 표현 — 두 박스 사이에 '...' 점줄임 + 반복 라벨 표시.
+        특허 도면에서 복수 인스턴스(1~N)를 압축 표현할 때 사용.
+        label_a: 시작 라벨 (기본 "1"), label_b: 끝 라벨 (기본 "N")
+
+        시각 효과:
+            [box_a] ---1--- ... ---N--- [box_b]
+            또는 수직 배치 시 점선 연결 + 측면 라벨
+
+        사용:
+            d.ellipsis_repeat(node1, nodeN, label_a='1', label_b='N')
+        """
+        self._cmds.append(('ellipsis_repeat', box_a, box_b, label_a, label_b))
+
+    def arrow_fanout_labeled(self, src: BoxRef,
+                              destinations_with_labels: list) -> None:
+        """
+        라벨 붙은 다중 화살표 (fan-out with labels).
+        1개 박스에서 N개 목적지로 각기 다른 라벨로 분기.
+        destinations_with_labels: [(dst_box, label), ...]
+
+        T-junction 없이 src 하단을 N등분한 출발점 사용 (split_from_box 방식).
+
+        사용:
+            d.arrow_fanout_labeled(router, [
+                (client1, 'TCP/IP'),
+                (client2, 'UDP'),
+                (client3, 'HTTP'),
+            ])
+        """
+        self._cmds.append(('arrow_fanout_labeled', src, destinations_with_labels))
 
     def autocloud(self, cx, cy, text="", fs=None, pad_x=0.55, pad_y=0.45,
                   max_w=None) -> BoxRef:
@@ -1555,6 +1682,389 @@ class Drawing:
         self._cmds.append(('route', pts, label, label_pos,
                             (label_dx, label_ha), ls))
 
+    # ── 신규 패턴 (v8.0: learn/new-shapes) ────────────────────────────────────
+
+    def sequence_diagram(self, actors: list, messages: list,
+                         x_start=0.60, y_top=9.50,
+                         actor_spacing=2.20,
+                         row_gap=0.75,
+                         actor_h=0.50, actor_w=1.60,
+                         lifeline_bottom=None,
+                         fs=None) -> dict:
+        """
+        UML-스타일 시퀀스 다이어그램.
+
+        actors  : [{'text': 'BROWSER\\n115', 'ref': 0}, ...]
+                  ref = actor index (0-based). ref 생략시 순서대로.
+        messages: [{'from': 0, 'to': 1, 'label': 'REQUEST 410a'}, ...]
+                  'dashed': True 이면 응답(점선) 스타일.
+
+        반환: {'actors': [BoxRef, ...], 'lifeline_y_bottom': float}
+
+        사용 예:
+            actors = [
+                {'text': 'BROWSER\\n115'},
+                {'text': 'SERVER\\n130'},
+                {'text': 'SERVER\\n140'},
+            ]
+            msgs = [
+                {'from': 0, 'to': 1, 'label': 'HTTP REQUEST FOR BID 410a'},
+                {'from': 0, 'to': 2, 'label': 'HTTP REQUEST FOR BID 410b'},
+                {'from': 1, 'to': 0, 'label': 'HTTP RESPONSE TO BID 430a', 'dashed': True},
+                {'from': 2, 'to': 0, 'label': 'HTTP RESPONSE TO BID 430b', 'dashed': True},
+            ]
+            d.sequence_diagram(actors, msgs)
+        """
+        fs = fs or FS_BODY
+        n = len(actors)
+        actor_boxes = []
+
+        # 1. 행위자 박스 배치 (ref 검사 스킵 — actor 이름이 첫 줄)
+        for i, actor in enumerate(actors):
+            text = actor.get('text', f'Actor {i}')
+            x = x_start + i * actor_spacing
+            y = y_top - actor_h
+            tw, th = self.measure_text(text, fs)
+            w = max(actor_w, tw + 0.24)
+            b = self.box(x - w/2, y, w, actor_h, text, fs)
+            self._no_ref_boxes.add(id(b))
+            actor_boxes.append(b)
+
+        # 2. 생명선 길이 결정
+        n_msgs = len(messages)
+        lifeline_len = (n_msgs + 0.5) * row_gap
+        if lifeline_bottom is None:
+            lifeline_bottom = y_top - actor_h - lifeline_len
+
+        lifeline_top = y_top - actor_h  # 박스 바닥
+
+        # 3. 각 행위자 생명선 (수직 점선) 등록
+        for b in actor_boxes:
+            self._cmds.append(('line', b.cx, lifeline_top, b.cx, lifeline_bottom, ':'))
+
+        # 4. 메시지 화살표 배치
+        for idx, msg in enumerate(messages):
+            fi = msg.get('from', 0)
+            ti = msg.get('to', 1)
+            lbl = msg.get('label', '')
+            is_dashed = msg.get('dashed', False)
+
+            y_msg = lifeline_top - (idx + 1) * row_gap
+
+            sx = actor_boxes[fi].cx
+            ex = actor_boxes[ti].cx
+            GAP = 0.08  # 생명선 → 화살표 끝 gap
+
+            # 생명선은 line이므로 화살표는 lifeline 위의 점에서 출발
+            # dangling 검증 예외 처리: lifeline 위 점이므로 _on_bus_line이 처리
+            pts = [(sx, y_msg), (ex, y_msg)]
+            ls = '--' if is_dashed else '-'
+            self._cmds.append(('route', pts, lbl, 0,
+                                (0.12, 'center'), ls))
+            # label_ha='center' 처리를 위해 label_pos=0, ldx=0, lha='center' 사용
+            # (실제로 _render_route에서 segment 중앙에 label 위치)
+
+        return {'actors': actor_boxes, 'lifeline_y_bottom': lifeline_bottom}
+
+    def swimlane_columns(self, lanes: list, rows: list,
+                         connections=None,
+                         x_start=0.50, y_top=10.20,
+                         lane_w=None, header_h=0.50,
+                         row_h=0.65, row_gap=0.95,
+                         fs=None) -> dict:
+        """
+        수직 스윔레인 (Vertical Swimlane) — 역할별 레인 + 프로세스 박스.
+
+        lanes: ['BROWSER\\n115', 'SERVER\\n120', 'SERVERS 130\\nand 140']
+        rows:  [
+            {'lane': 0, 'text': '310\\nBROWSER REQUESTS\\nWEBPAGE'},
+            {'lane': 1, 'text': '320\\nSERVER RECEIVES\\nREQUEST'},
+            ...
+        ]
+        lane_w: 레인 폭 (None이면 자동: 가장 긴 박스 텍스트 기준)
+
+        반환: {'lane_boxes': [BoxRef header...], 'step_boxes': [BoxRef...]}
+
+        사용 예:
+            d.swimlane_columns(
+                lanes=['BROWSER\\n115', 'SERVER\\n120'],
+                rows=[
+                    {'lane': 0, 'text': '310\\nBROWSER REQUESTS WEBPAGE'},
+                    {'lane': 1, 'text': '320\\nSERVER RECEIVES REQUEST'},
+                ]
+            )
+        """
+        fs = fs or FS_BODY
+        n_lanes = len(lanes)
+
+        # 자동 레인 폭: 최대 텍스트 폭 기준
+        if lane_w is None:
+            max_tw = 0
+            for r in rows:
+                tw, _ = self.measure_text(r.get('text', ''), fs)
+                max_tw = max(max_tw, tw)
+            for l in lanes:
+                tw, _ = self.measure_text(l, fs)
+                max_tw = max(max_tw, tw)
+            lane_w = max_tw + 0.40
+            lane_w = max(lane_w, 1.60)
+
+        total_w = lane_w * n_lanes
+        page_cx = x_start + total_w / 2
+
+        # 1. 레인 헤더 박스 (ref 검사 스킵 — lane 이름이 첫 줄)
+        header_boxes = []
+        for i, lane_text in enumerate(lanes):
+            lx = x_start + i * lane_w
+            ly = y_top - header_h
+            b = self.box(lx, ly, lane_w, header_h, lane_text, fs)
+            self._no_ref_boxes.add(id(b))
+            header_boxes.append(b)
+
+        # 2. 레인 경계선 (수직선)
+        for i in range(n_lanes + 1):
+            lx = x_start + i * lane_w
+            self._cmds.append(('line', lx, y_top - header_h, lx, y_top - header_h - (len(rows)+1)*(row_h+row_gap), '-'))
+
+        # 3. 단계 박스 배치
+        step_boxes = []
+        # 3. 박스 배치 — 같은 시점 박스는 같은 y행에 나란히
+        # connections에서 연결된 src→dst 쌍을 보고, dst가 이전 행과 같은 y에 올 수 있으면 같은 행
+        cur_y = y_top - header_h - row_gap
+        ARR_GAP = 0.50  # 행 간 화살표 공간 (반으로 줄임)
+
+        for row in rows:
+            li = row.get('lane', 0)
+            text = row.get('text', '')
+            box_w = lane_w - 0.30
+            box_x = x_start + li * lane_w + 0.15
+            box_y = cur_y - row_h
+            b = self.box(box_x, box_y, box_w, row_h, text, fs)
+            step_boxes.append(b)
+            cur_y = box_y - ARR_GAP
+
+        # 4. connections 화살표
+        if connections:
+            for conn in connections:
+                src_idx = conn[0]
+                dst_idx = conn[1]
+                ls = conn[2] if len(conn) > 2 else '-'
+                src_box = step_boxes[src_idx]
+                dst_box = step_boxes[dst_idx]
+
+                same_lane = abs(src_box.cx - dst_box.cx) < 0.1
+                adjacent = abs(src_idx - dst_idx) == 1
+
+                if same_lane and adjacent:
+                    # 같은 레인 인접: 수직 화살표
+                    self.arrow_v(src_box, dst_box)
+                elif same_lane:
+                    # 같은 레인 비인접: 수직 (중간 박스 피해서)
+                    self.arrow_v(src_box, dst_box)
+                else:
+                    # 다른 레인: 옆면 수평 연결 (공간 절약)
+                    # src와 dst가 같은 y행이면 직접 수평
+                    if abs(src_box.cy - dst_box.cy) < row_h:
+                        if dst_box.cx > src_box.cx:
+                            self.arrow_route([src_box.right_mid(), dst_box.left_mid()], ls=ls)
+                        else:
+                            self.arrow_route([src_box.left_mid(), dst_box.right_mid()], ls=ls)
+                    else:
+                        # src 아래 → 중간 y → dst 레인 → dst 위
+                        mid_y = dst_box.top + 0.25
+                        if dst_box.cx > src_box.cx:
+                            self.arrow_route([
+                                src_box.bot_mid(),
+                                ('down_to', mid_y),
+                                ('right_to', dst_box.cx),
+                                dst_box.top_mid(),
+                            ], ls=ls)
+                        else:
+                            self.arrow_route([
+                                src_box.bot_mid(),
+                                ('down_to', mid_y),
+                                ('left_to', dst_box.cx),
+                                dst_box.top_mid(),
+                            ], ls=ls)
+
+        return {'lane_headers': header_boxes, 'step_boxes': step_boxes}
+
+    def horizontal_pipeline_flow(self, stages: list,
+                                  x_start=None, cx_start=None, cy=5.50,
+                                  stage_gap=0.55,
+                                  stage_w=None, stage_h=0.65,
+                                  fs=None) -> list:
+        """
+        수평 파이프라인 플로우 — 스테이지 박스들이 좌→우로 연결.
+
+        stages: ['INPUT\\n100', 'PROCESS\\n200', 'OUTPUT\\n300']
+                또는 [{'text': '...', 'w': 1.5}, ...]
+
+        x_start: 첫 박스 left 좌표 (cx_start의 대안 — 마진 계산이 쉬움)
+        cx_start: 첫 박스 중심 x (deprecated, x_start 권장)
+
+        반환: [BoxRef, ...] (각 스테이지 박스)
+
+        사용 예:
+            d.horizontal_pipeline_flow(
+                ['INPUT\\n100', 'EMBEDDING\\n200', 'CLUSTERING\\n300'],
+                x_start=0.80, cy=5.5
+            )
+        """
+        fs = fs or FS_BODY
+        boxes = []
+
+        # stage 폭 자동 계산 (가장 넓은 텍스트 기준)
+        texts = []
+        for s in stages:
+            if isinstance(s, dict):
+                texts.append(s.get('text', ''))
+            else:
+                texts.append(str(s))
+
+        if stage_w is None:
+            max_tw = 0
+            for t in texts:
+                tw, _ = self.measure_text(t, fs)
+                max_tw = max(max_tw, tw)
+            stage_w = max_tw + 0.30
+            stage_w = max(stage_w, 1.20)
+
+        # x_start 우선, cx_start fallback
+        if x_start is not None:
+            cur_cx = x_start + stage_w / 2
+        elif cx_start is not None:
+            cur_cx = cx_start
+        else:
+            cur_cx = stage_w / 2 + 0.50  # 기본: 페이지 왼쪽 0.5" 여백
+        for i, s in enumerate(stages):
+            text = texts[i]
+            w = stage_w if not isinstance(s, dict) else s.get('w', stage_w)
+            x = cur_cx - w / 2
+            y = cy - stage_h / 2
+            b = self.box(x, y, w, stage_h, text, fs)
+            boxes.append(b)
+            # 실제 박스 폭(auto-expand 후) 기반: 다음 박스의 cx = b.right + gap + next_w/2
+            # next_w는 다음 박스 실제폭을 모르므로 stage_w 사용 (auto-expand로 cx 보정됨)
+            cur_cx = b.right + stage_gap + stage_w / 2
+
+        # 화살표 연결: 실제 박스 edge 기반 (stage→stage)
+        for i in range(len(boxes) - 1):
+            src = boxes[i]
+            dst = boxes[i + 1]
+            self.arrow_h(src, dst)
+
+        # 마지막 박스는 의도적 terminal (dead-end 경고 스킵)
+        if boxes:
+            self._terminal_boxes.add(id(boxes[-1]))
+
+        return boxes
+
+    def rounded_rect(self, x, y, w, h, text, fs=None, radius=0.15) -> BoxRef:
+        """
+        둥근 모서리 사각형 (flowchart terminator / 시작·끝 노드).
+
+        사용:
+            start = d.rounded_rect(2.0, 8.5, 2.5, 0.55, 'START\\n100')
+            end   = d.rounded_rect(2.0, 1.5, 2.5, 0.55, 'END\\n900')
+        """
+        fs = fs or FS_BODY
+        MIN_PAD_W, MIN_PAD_H = 0.24, 0.14
+        tw, th = self.measure_text(text, fs or FS_BODY)
+        min_w = tw + MIN_PAD_W
+        min_h = th + MIN_PAD_H
+        if w < min_w:
+            cx = x + w / 2; w = min_w; x = cx - w / 2
+        if h < min_h:
+            cy = y + h / 2; h = min_h; y = cy - h / 2
+        b = BoxRef(x, y, w, h)
+        self._box_refs.append(b)
+        self._cmds.append(('rounded_rect', b, text, fs, radius))
+        return b
+
+    def numbered_sequence_arrows(self, steps: list,
+                                  x_start=1.00, y_top=9.00,
+                                  x_gap=2.20, y_gap=1.00,
+                                  node_r=0.35, fs=None,
+                                  direction='TB') -> list:
+        """
+        번호 매긴 순서 화살표 — 원형 노드 + 순서 번호 + 화살표.
+
+        steps: [
+            {'num': '1', 'text': 'FBL\\nFire Hose Bidder', 'ref': ''},
+            {'num': '2', 'text': 'INDEX\\nReal-Time DB', 'ref': ''},
+            {'num': '3', 'text': 'RG\\nRendering Crawler', 'ref': ''},
+        ]
+
+        direction: 'TB' (위→아래) 또는  'LR' (좌→우)
+
+        반환: [BoxRef(oval), ...] 각 노드
+
+        사용 예:
+            d.numbered_sequence_arrows(
+                steps=[
+                    {'num': '1', 'text': 'FBL\\nFire Hose Bidder'},
+                    {'num': '2', 'text': 'INDEX\\nReal-Time DB'},
+                    {'num': '3', 'text': 'RG\\nRendering Crawler'},
+                ],
+                direction='TB'
+            )
+        """
+        fs = fs or FS_BODY
+        ovals = []
+
+        # 텍스트 기반 oval 크기 자동 결정
+        # oval 내부 유효 수평 폭 ≈ oval_width * 0.70 (곡선으로 인한 감소)
+        # 따라서 oval_width = (text_width + pad) / 0.70
+        OVAL_USABLE_FACTOR = 0.70
+        OVAL_PAD_X = 0.20
+        OVAL_PAD_Y = 0.18
+
+        for i, step in enumerate(steps):
+            num = step.get('num', str(i+1))
+            text = step.get('text', f'Step {i+1}')
+
+            if direction == 'TB':
+                cx = x_start
+                cy = y_top - i * y_gap
+            else:  # LR
+                cx = x_start + i * x_gap
+                cy = y_top
+
+            # 텍스트 실측 기반 oval 크기 결정
+            tw, th = self.measure_text(text, fs)
+            min_oval_w = (tw + OVAL_PAD_X) / OVAL_USABLE_FACTOR
+            min_oval_h = (th + OVAL_PAD_Y) / OVAL_USABLE_FACTOR
+            oval_w = max(node_r * 2, min_oval_w)
+            oval_h = max(node_r * 2, min_oval_h)
+            # 원형 유지 옵션: 긴 쪽으로 통일
+            # oval_w = oval_h = max(oval_w, oval_h)  # 원형 강제시
+
+            # oval 노드 생성 (ref 검사 스킵 — 약칭 + 전체명 형식)
+            o = self.oval(cx, cy, oval_w, oval_h, text, fs)
+            self._no_ref_boxes.add(id(o))
+            ovals.append(o)
+
+            # 순서 번호를 oval 외부 왼쪽 상단에 표시
+            num_x = cx - node_r - 0.15
+            num_y = cy + node_r + 0.05
+            self._cmds.append(('label', num_x, num_y, num, 'right', fs))
+
+        # 화살표 연결 (sequential)
+        for i in range(len(ovals) - 1):
+            src = ovals[i]
+            dst = ovals[i + 1]
+            if direction == 'TB':
+                self.arrow_route([src.bot_mid(), dst.top_mid()])
+            else:
+                self.arrow_route([src.right_mid(), dst.left_mid()])
+
+        # 마지막 노드는 의도적 terminal (dead-end 경고 스킵)
+        if ovals:
+            self._terminal_boxes.add(id(ovals[-1]))
+
+        return ovals
+
     def split_from_box(self, src_box: BoxRef, destinations, via_y=None):
         """
         1→N 팬아웃 (T-junction 없음).
@@ -1632,7 +2142,7 @@ class Drawing:
                         color=BOX_EDGE, lw=LW_ARR, linestyle=ls,
                         solid_capstyle='round', zorder=Z_ARROW)
 
-        # Pass 2b: cloud / iot_stack / brace / ref_callout 렌더링
+        # Pass 2b: cloud / iot_stack / brace / ref_callout / new patterns 렌더링
         import numpy as np
         from matplotlib.patches import Circle, Polygon, FancyArrowPatch
         for cmd in self._cmds:
@@ -1651,6 +2161,27 @@ class Drawing:
             elif cmd[0] == 'ref_callout_bus':
                 _, bus_x, ref_num, side, fs = cmd
                 self._render_ref_callout_bus(ax, bus_x, ref_num, side, fs)
+            elif cmd[0] == 'database_cylinder':
+                _, cx, cy, w, h, text, fs, b = cmd
+                self._render_database_cylinder(ax, cx, cy, w, h, text, fs)
+            elif cmd[0] == 'oval':
+                _, cx, cy, w, h, text, fs, b = cmd
+                self._render_oval(ax, cx, cy, w, h, text, fs)
+            elif cmd[0] == 'arrow_wireless':
+                _, box_a, box_b, label = cmd
+                self._render_arrow_wireless(ax, box_a, box_b, label)
+            elif cmd[0] == 'wireless_signal':
+                _, x, y, direction, n_arcs, scale = cmd
+                self._render_wireless_signal(ax, x, y, direction, n_arcs, scale)
+            elif cmd[0] == 'ellipsis_repeat':
+                _, box_a, box_b, label_a, label_b = cmd
+                self._render_ellipsis_repeat(ax, box_a, box_b, label_a, label_b)
+            elif cmd[0] == 'arrow_fanout_labeled':
+                _, src, destinations_with_labels = cmd
+                self._render_arrow_fanout_labeled(ax, src, destinations_with_labels)
+            elif cmd[0] == 'rounded_rect':
+                _, b, text, fs_rr, radius = cmd
+                self._render_rounded_rect(ax, b, text, fs_rr, radius)
 
         # Pass 3: 박스 white fill
         for cmd in self._cmds:
@@ -1744,6 +2275,24 @@ class Drawing:
         plt.close(self.fig)
 
     # ── 신규 도형 렌더 ────────────────────────────────────────────────────────
+
+    def _render_rounded_rect(self, ax, b, text, fs, radius):
+        """둥근 모서리 사각형 렌더링."""
+        from matplotlib.patches import FancyBboxPatch as FBP
+        r = min(radius, b.w / 2 - 0.01, b.h / 2 - 0.01)
+        pad = r
+        # FancyBboxPatch round style: boxstyle="round,pad=0,rounding_size=r"
+        ax.add_patch(FBP(
+            (b.x, b.y), b.w, b.h,
+            boxstyle=f"round,pad=0,rounding_size={r}",
+            facecolor=BOX_FILL, edgecolor=BOX_EDGE,
+            linewidth=LW_BOX, zorder=Z_BOX_EDGE))
+        fs_fit = self._fit_font(text, b.w - 0.24, b.h - 0.10, fs or FS_BODY)
+        ax.text(b.cx, b.cy, text,
+                ha='center', va='center',
+                fontsize=fs_fit, fontweight=FW,
+                multialignment='center', wrap=False,
+                zorder=Z_BOX_TEXT)
 
     def _render_cloud(self, ax, cx, cy, w, h, text, fs):
         """구름 모양 — 타원 둘레에 원 N개 배치 후 바깥쪽 호만 그림.
@@ -2083,6 +2632,271 @@ class Drawing:
                         ha='center', va='top',
                         fontsize=fs, fontweight=FW, zorder=Z_SEC_LABEL)
 
+    # ── 신규 패턴 렌더 (learn/new-shapes) ────────────────────────────────────
+
+    def _render_database_cylinder(self, ax, cx, cy, w, h, text, fs):
+        """실린더형 DB 도형 렌더링.
+        구조: 상단 타원 + 직사각형 몸체 + 하단 타원 (반쪽만 visible).
+        """
+        import numpy as np
+        ry = h * 0.15   # 타원 세로 반축 (전체 높이의 15%)
+        rx = w / 2
+
+        body_top    = cy + h / 2 - ry
+        body_bottom = cy - h / 2 + ry
+
+        # ① 직사각형 몸체 (흰 fill → border)
+        ax.fill([cx-rx, cx+rx, cx+rx, cx-rx],
+                [body_bottom, body_bottom, body_top, body_top],
+                color=BOX_FILL, zorder=Z_BOX_FILL)
+        ax.plot([cx-rx, cx-rx], [body_bottom, body_top],
+                color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE)
+        ax.plot([cx+rx, cx+rx], [body_bottom, body_top],
+                color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE)
+
+        # ② 상단 타원 (완전 타원)
+        theta = np.linspace(0, 2*np.pi, 100)
+        ex = cx + rx * np.cos(theta)
+        ey = body_top + ry * np.sin(theta)
+        ax.fill(ex, ey, color=BOX_FILL, zorder=Z_BOX_FILL + 1)
+        ax.plot(ex, ey, color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE + 1)
+
+        # ③ 하단 타원 — 아랫쪽 반호만 표시 (반원 arc, 위쪽은 몸체로 가려짐)
+        theta_bot = np.linspace(np.pi, 2*np.pi, 60)
+        bex = cx + rx * np.cos(theta_bot)
+        bey = body_bottom + ry * np.sin(theta_bot)
+        ax.plot(bex, bey, color=BOX_EDGE, lw=LW_BOX, zorder=Z_BOX_EDGE)
+
+        # ④ 텍스트 (몸체 중앙)
+        if text:
+            text_cy = (body_top + body_bottom) / 2
+            fs_use = self._fit_font(text, w - 0.18, (body_top - body_bottom) - 0.10, fs)
+            ax.text(cx, text_cy, text,
+                    ha='center', va='center',
+                    fontsize=fs_use, fontweight=FW,
+                    multialignment='center', zorder=Z_BOX_TEXT)
+
+    def _render_oval(self, ax, cx, cy, w, h, text, fs):
+        """타원형 프로세서 노드 렌더링 (matplotlib Ellipse 패치)."""
+        from matplotlib.patches import Ellipse
+        # 흰 fill
+        ax.add_patch(Ellipse((cx, cy), w, h,
+                             facecolor=BOX_FILL, edgecolor='none',
+                             linewidth=0, zorder=Z_BOX_FILL))
+        # 테두리
+        ax.add_patch(Ellipse((cx, cy), w, h,
+                             facecolor='none', edgecolor=BOX_EDGE,
+                             linewidth=LW_BOX, zorder=Z_BOX_EDGE))
+        # 텍스트 (내접 사각형 기준 90% 폭)
+        if text:
+            fs_use = self._fit_font(text, w * 0.80, h * 0.70, fs)
+            ax.text(cx, cy, text,
+                    ha='center', va='center',
+                    fontsize=fs_use, fontweight=FW,
+                    multialignment='center', zorder=Z_BOX_TEXT)
+
+    def _render_arrow_wireless(self, ax, box_a: BoxRef, box_b: BoxRef, label: str):
+        """지그재그 무선 연결선 렌더링.
+        직선 경로 위에 지그재그(sinusoidal) 패턴을 겹쳐서 무선 채널 표현.
+        마지막 세그먼트에 화살촉 추가.
+        """
+        import numpy as np
+
+        # 두 박스의 가장 가까운 edge 좌표 계산
+        # box_a → box_b 방향으로 edge 선택
+        if abs(box_a.cx - box_b.cx) > abs(box_a.cy - box_b.cy):
+            # 수평 주도
+            if box_b.cx > box_a.cx:
+                sx, sy = box_a.right_mid()
+                ex, ey = box_b.left_mid()
+            else:
+                sx, sy = box_a.left_mid()
+                ex, ey = box_b.right_mid()
+        else:
+            # 수직 주도
+            if box_b.cy < box_a.cy:
+                sx, sy = box_a.bot_mid()
+                ex, ey = box_b.top_mid()
+            else:
+                sx, sy = box_a.top_mid()
+                ex, ey = box_b.bot_mid()
+
+        # 경로 벡터
+        dx = ex - sx
+        dy = ey - sy
+        length = math.sqrt(dx*dx + dy*dy)
+        if length < 1e-6:
+            return
+        ux, uy = dx / length, dy / length        # 단위 벡터 (경로 방향)
+        nx, ny = -uy, ux                          # 법선 벡터 (지그재그 방향)
+
+        # 지그재그 파라미터
+        n_pts = 80
+        t = np.linspace(0, 1, n_pts)
+        # 양 끝 10% 구간은 직선, 중간은 지그재그
+        amp_envelope = np.clip(np.minimum(t, 1.0 - t) / 0.10, 0.0, 1.0)
+        ZIG_FREQ = 8      # 지그재그 주파수 (왕복 횟수)
+        ZIG_AMP  = 0.06   # 지그재그 진폭 (인치)
+        zz = ZIG_AMP * amp_envelope * np.sign(np.sin(ZIG_FREQ * 2 * np.pi * t))
+
+        wx = sx + t * dx + zz * nx
+        wy = sy + t * dy + zz * ny
+
+        # 지그재그 선 그리기
+        ax.plot(wx, wy, color=BOX_EDGE, lw=LW_ARR,
+                solid_capstyle='round', zorder=Z_ARROW)
+
+        # 화살촉 (끝점 방향으로)
+        ax.annotate('', xy=(ex, ey), xytext=(wx[-5], wy[-5]),
+                    arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                                   lw=LW_ARR, mutation_scale=12),
+                    zorder=Z_ARROWHEAD)
+
+        # 라벨 (경로 중앙, 법선 방향으로 0.15" 오프셋)
+        if label:
+            mid = n_pts // 2
+            mx, my = wx[mid], wy[mid]
+            ax.text(mx + nx * 0.15, my + ny * 0.15, label,
+                    ha='center', va='center',
+                    fontsize=FS_BODY, fontweight=FW,
+                    bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+
+    def _render_wireless_signal(self, ax, x, y, direction, n_arcs, scale):
+        """))) 동심원 방사 아이콘 렌더링.
+        direction: 'right'→))) , 'left'→((( , 'up'→^^^ , 'down'→vvv
+        """
+        import numpy as np
+        # 방향별 호 각도 범위 (시작, 끝)
+        DIR_ANGLES = {
+            'right': (-60,  60),
+            'left':  (120, 240),
+            'up':    ( 30, 150),
+            'down':  (210, 330),
+        }
+        a_start, a_end = DIR_ANGLES.get(direction, (-60, 60))
+        theta = np.linspace(np.radians(a_start), np.radians(a_end), 60)
+
+        for i in range(1, n_arcs + 1):
+            r = scale * i
+            ax.plot(x + r * np.cos(theta),
+                    y + r * np.sin(theta),
+                    color=BOX_EDGE, lw=LW_ARR * 0.9,
+                    solid_capstyle='round', zorder=Z_ARROW)
+
+    def _render_ellipsis_repeat(self, ax, box_a: BoxRef, box_b: BoxRef,
+                                 label_a: str, label_b: str):
+        """A...N 반복 표현 렌더링.
+        두 박스 중간에 '...' 텍스트와 라벨을 배치.
+        박스 간 연결은 점선으로 표현.
+        """
+        import numpy as np
+
+        # 두 박스의 가장 가까운 edge 사이 중간점 계산
+        if abs(box_a.cx - box_b.cx) > abs(box_a.cy - box_b.cy):
+            # 수평 배치
+            if box_b.cx > box_a.cx:
+                sx, sy = box_a.right_mid()
+                ex, ey = box_b.left_mid()
+            else:
+                sx, sy = box_a.left_mid()
+                ex, ey = box_b.right_mid()
+            is_horiz = True
+        else:
+            # 수직 배치
+            if box_b.cy < box_a.cy:
+                sx, sy = box_a.bot_mid()
+                ex, ey = box_b.top_mid()
+            else:
+                sx, sy = box_a.top_mid()
+                ex, ey = box_b.bot_mid()
+            is_horiz = False
+
+        mx = (sx + ex) / 2
+        my = (sy + ey) / 2
+
+        # 점선 연결 (박스 a→중간 절반, 중간→박스 b 절반)
+        GAP = 0.15  # '...' 텍스트 양쪽 여백
+        if is_horiz:
+            ax.plot([sx, mx - GAP], [sy, my], color=BOX_EDGE, lw=LW_ARR,
+                    linestyle='--', solid_capstyle='butt', zorder=Z_ARROW)
+            ax.plot([mx + GAP, ex], [my, ey], color=BOX_EDGE, lw=LW_ARR,
+                    linestyle='--', solid_capstyle='butt', zorder=Z_ARROW)
+            # '...' 텍스트
+            ax.text(mx, my, '...', ha='center', va='center',
+                    fontsize=FS_BODY + 2, fontweight='bold', zorder=Z_ARR_LABEL)
+            # 라벨 위쪽에 표시
+            ax.text(sx + (mx-sx)*0.3, sy + 0.15, label_a,
+                    ha='center', va='bottom',
+                    fontsize=FS_BODY, fontweight=FW,
+                    bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+            ax.text(ex - (ex-mx)*0.3, ey + 0.15, label_b,
+                    ha='center', va='bottom',
+                    fontsize=FS_BODY, fontweight=FW,
+                    bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+        else:
+            ax.plot([sx, mx], [sy, my - GAP], color=BOX_EDGE, lw=LW_ARR,
+                    linestyle='--', solid_capstyle='butt', zorder=Z_ARROW)
+            ax.plot([mx, ex], [my + GAP, ey], color=BOX_EDGE, lw=LW_ARR,
+                    linestyle='--', solid_capstyle='butt', zorder=Z_ARROW)
+            ax.text(mx, my, '...', ha='center', va='center',
+                    fontsize=FS_BODY + 2, fontweight='bold', zorder=Z_ARR_LABEL)
+            ax.text(sx + 0.18, (sy + my) / 2, label_a,
+                    ha='left', va='center',
+                    fontsize=FS_BODY, fontweight=FW,
+                    bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+            ax.text(ex + 0.18, (my + ey) / 2, label_b,
+                    ha='left', va='center',
+                    fontsize=FS_BODY, fontweight=FW,
+                    bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+
+    def _render_arrow_fanout_labeled(self, ax, src: BoxRef,
+                                      destinations_with_labels: list):
+        """라벨 붙은 다중 화살표 렌더링.
+        src 하단을 N등분 → 각 목적지까지 꺾인 화살표 + 라벨.
+        """
+        n = len(destinations_with_labels)
+        if n == 0:
+            return
+
+        # src 하단 N+1 등분점 계산 (T-junction 방지)
+        step = src.w / (n + 1)
+        start_xs = [src.left + step * (i + 1) for i in range(n)]
+
+        # via_y: 모든 목적지 top 중 최대 + 0.20"
+        all_tops = [dst.top for dst, _ in destinations_with_labels]
+        via_y = max(all_tops) + 0.20
+
+        for i, ((dst, lbl), sx) in enumerate(zip(destinations_with_labels, start_xs)):
+            src_pt = (sx, src.bot)
+            dst_pt = dst.top_mid()
+
+            if abs(sx - dst.cx) < 0.01:
+                # 수직 직선
+                pts = [src_pt, dst_pt]
+            else:
+                pts = [src_pt, (sx, via_y), (dst.cx, via_y), dst_pt]
+
+            # 경로 렌더링
+            for k in range(len(pts) - 2):
+                ax.plot([pts[k][0], pts[k+1][0]],
+                        [pts[k][1], pts[k+1][1]],
+                        color=BOX_EDGE, lw=LW_ARR,
+                        solid_capstyle='butt', zorder=Z_ARROW)
+            # 마지막 세그먼트 → 화살촉
+            ax.annotate('', xy=pts[-1], xytext=pts[-2],
+                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
+                                       lw=LW_ARR, mutation_scale=12),
+                        zorder=Z_ARROWHEAD)
+
+            # 라벨: via_y 아래 수직 구간 (또는 수평 구간)에 배치
+            if lbl and len(pts) >= 3:
+                # 수평 구간(via_y 구간) 중간에 배치
+                seg_mx = (pts[1][0] + pts[2][0]) / 2 if len(pts) >= 4 else pts[-1][0]
+                ax.text(seg_mx, via_y + 0.10, lbl,
+                        ha='center', va='bottom',
+                        fontsize=FS_BODY, fontweight=FW,
+                        bbox=LABEL_BG, zorder=Z_ARR_LABEL)
+
     # ── 내부 렌더 ─────────────────────────────────────────────────────────────
 
     def _render_bidir(self, ax, pts):
@@ -2213,6 +3027,7 @@ class Drawing:
         issues = []
 
         # 1. 박스 마진 검증
+        MARGIN_EPS = 0.005  # 부동소수점 오차 허용치
         if bnd_rect:
             bx1, by1, bx2, by2 = bnd_rect
             PAD = self.MIN_BND_PAD
@@ -2220,13 +3035,13 @@ class Drawing:
                 if cmd[0] == 'box':
                     _, b, text, _ = cmd
                     short = text[:30].replace('\n', ' ')
-                    if b.left - bx1 < PAD and b.left >= bx1 - 0.05:
+                    if b.left - bx1 < PAD - MARGIN_EPS and b.left >= bx1 - 0.05:
                         issues.append(f'Box "{short}": left margin {b.left-bx1:.2f}" < {PAD}" min')
-                    if bx2 - b.right < PAD and b.right <= bx2 + 0.05:
+                    if bx2 - b.right < PAD - MARGIN_EPS and b.right <= bx2 + 0.05:
                         issues.append(f'Box "{short}": right margin {bx2-b.right:.2f}" < {PAD}" min')
-                    if b.bot - by1 < PAD and b.bot >= by1 - 0.05:
+                    if b.bot - by1 < PAD - MARGIN_EPS and b.bot >= by1 - 0.05:
                         issues.append(f'Box "{short}": bottom margin {b.bot-by1:.2f}" < {PAD}" min')
-                    if by2 - b.top < PAD and b.top <= by2 + 0.05:
+                    if by2 - b.top < PAD - MARGIN_EPS and b.top <= by2 + 0.05:
                         issues.append(f'Box "{short}": top margin {by2-b.top:.2f}" < {PAD}" min')
 
         # 2. 파이프 문자 감지 (비표준 — 줄바꿈 사용 권고)
@@ -2310,6 +3125,8 @@ class Drawing:
         for cmd in self._cmds:
             if cmd[0] == 'box':
                 _, b, text, _ = cmd
+                if id(b) in self._no_ref_boxes:
+                    continue  # 시퀀스 다이어그램 행위자 등 ref 불필요 박스
                 short = text[:30].replace('\n', ' ')
                 lines = text.strip().split('\n')
                 if lines:
@@ -2462,7 +3279,8 @@ class Drawing:
                             f'Box "{short}": vertical padding too tight '
                             f'(text={th_in:.2f}", box={b.h:.2f}", pad={((b.h-th_in)/2):.2f}" < {BOX_PAD_V}" min). '
                             f'Increase box height to at least {th_in + BOX_PAD_V*2:.2f}".')
-                    if tw_in > b.w - BOX_PAD_H * 2 and tw_in <= b.w + 0.01:
+                    PAD_EPS = 0.005  # float 측정 오차 허용치
+                    if tw_in > b.w - BOX_PAD_H * 2 + PAD_EPS and tw_in <= b.w + 0.01:
                         issues.append(
                             f'Box "{short}": horizontal padding too tight '
                             f'(text={tw_in:.2f}", box={b.w:.2f}", pad={((b.w-tw_in)/2):.2f}" < {BOX_PAD_H}" min). '
@@ -2507,10 +3325,13 @@ class Drawing:
 
         # 9c. 박스 참조번호 완전 누락 감지
         # 박스 텍스트 첫 줄이 3~4자리 숫자가 아니면 참조번호 없는 것으로 간주
+        # (sequence_diagram actor, swimlane header 등 _no_ref_boxes는 스킵)
         REF_FIRST_LINE = re.compile(r'^\d{2,4}$')
         for cmd in self._cmds:
-            if cmd[0] == 'box':
-                _, b, text, _ = cmd
+            if cmd[0] in ('box', 'rounded_rect'):
+                _, b, text, *_ = cmd
+                if id(b) in self._no_ref_boxes:
+                    continue  # 시퀀스 다이어그램 행위자 등 ref 불필요 박스
                 short = text[:30].replace('\n', ' ')
                 lines = text.strip().split('\n')
                 first_line = lines[0].strip() if lines else ''
@@ -2544,6 +3365,9 @@ class Drawing:
             # 입력은 있는데 출력이 없고, 전체 박스가 2개 이상인 경우만 체크
             if (box_has_incoming[id(b)] and not box_has_outgoing[id(b)]
                     and len(self._box_refs) > 1):
+                # _terminal_boxes로 마킹된 박스는 의도적 terminal → 스킵
+                if id(b) in self._terminal_boxes:
+                    continue
                 # bidir 화살표는 양방향이므로 outgoing으로도 간주 — 이미 위에서 처리됨
                 # 마지막 노드(terminal)는 dead-end가 아닐 수 있음
                 # 단, 모든 박스 중 outgoing이 있는 게 하나라도 있으면 terminal 아님
@@ -2601,15 +3425,19 @@ class Drawing:
                                 f'segment ({ax0:.2f},{ay0:.2f})→({ax1:.2f},{ay1:.2f}) '
                                 f'crosses box text area. Reroute the arrow.')
 
-        # 12. 공간 낭비 검증: boundary 내 빈 공간이 25% 이상이면 경고
+        # 12. 공간 낭비 검증: boundary 내 빈 공간이 35% 이상이면 경고
         if bnd_rect and self._box_refs:
             bx1, by1, bx2, by2 = bnd_rect
             bnd_area = (bx2 - bx1) * (by2 - by1)
-            # 모든 박스의 최대 범위 계산 (content bounding box)
+            # 모든 박스 및 line(lifeline 등) 의 최대 범위 계산
             content_top = max(b.top for b in self._box_refs)
             content_bot = min(b.bot for b in self._box_refs)
-            content_left = min(b.left for b in self._box_refs)
-            content_right = max(b.right for b in self._box_refs)
+            # line 끝점도 포함 (sequence diagram lifeline 등)
+            for cmd in self._cmds:
+                if cmd[0] == 'line':
+                    _, lx1, ly1, lx2, ly2, _ = cmd
+                    content_top = max(content_top, ly1, ly2)
+                    content_bot = min(content_bot, ly1, ly2)
             content_h = content_top - content_bot + 0.60  # 상하 여백
             bnd_h = by2 - by1
             usage = content_h / bnd_h if bnd_h > 0 else 1.0

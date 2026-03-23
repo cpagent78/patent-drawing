@@ -726,7 +726,7 @@ class Drawing:
                     else:
                         self.arrow_route(pts, label=lbl)
 
-        self._center_all_boxes()
+        # _center_all_boxes() 제거 — save() 2-pass에서 실측 기반 center
         self.fig_label()
 
     def _layout_bus(self, rows=None, external=None, gap=1.10,
@@ -1002,7 +1002,7 @@ class Drawing:
 
         # Step 7: 페이지 boundary (라벨 없음 — internal에 이미 boundary_label)
         self.boundary(BND_X1, BND_Y1, BND_X2, BND_Y2)
-        self._center_all_boxes()
+        # _center_all_boxes() 제거 — save() 2-pass에서 실측 기반 center
         self.fig_label()
 
     # ── 요소 추가 ─────────────────────────────────────────────────────────────
@@ -1109,9 +1109,9 @@ class Drawing:
 
     def _center_all_boxes(self):
         """
-        공용 중앙 정렬: 모든 배치된 박스의 min_left ~ max_right 기준으로
-        페이지 수평 중앙에 오도록 전체 shift.
-        모든 레이아웃 타입에서 배치 완료 후 호출.
+        DEPRECATED — save() 2-pass 렌더링으로 대체됨.
+        실측 기반 centering이 이 메서드보다 정확함.
+        하위 호환을 위해 코드는 유지하되 호출하지 않음.
         """
         if not self._box_refs:
             return
@@ -1124,22 +1124,7 @@ class Drawing:
                 min_left  = min(min_left, cmd[1])
                 max_right = max(max_right, cmd[3])
 
-        # callout/label 예상 폭 반영 (렌더링 전이라 실측 불가 → 예상치)
-        CALLOUT_EST = 0.50  # callout 텍스트 + 물결선 예상 폭
-        for cmd in self._cmds:
-            if cmd[0] == 'ref_callout':
-                _, box, ref_num, side_enc, offset, fs = cmd
-                base_side = side_enc.split(':')[0]
-                if 'left' in base_side:
-                    min_left = min(min_left, box.left - CALLOUT_EST)
-                elif 'right' in base_side:
-                    max_right = max(max_right, box.right + CALLOUT_EST)
-            elif cmd[0] == 'ref_callout_bus':
-                _, bus_x, ref_num, side, fs = cmd
-                if side == 'right':
-                    max_right = max(max_right, bus_x + CALLOUT_EST + 0.30)
-                else:
-                    min_left = min(min_left, bus_x - CALLOUT_EST - 0.30)
+        # callout 추측 제거 — save() 2-pass에서 실측 기반으로 처리
         content_cx = (min_left + max_right) / 2
         page_cx = PAGE_W / 2
         dx = page_cx - content_cx

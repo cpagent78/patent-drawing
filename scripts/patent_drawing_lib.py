@@ -3141,7 +3141,7 @@ class Drawing:
             cy_offset = -ry * 0.3
             return w - 0.22, text_h, 0, cy_offset
         elif shape_type == 'diamond':
-            return w * 0.55, h * 0.45, 0, 0
+            return w * 0.45, h * 0.35, 0, 0
         elif shape_type == 'cloud':
             return w * 0.65, h * 0.50, 0, 0
         elif shape_type == 'oval':

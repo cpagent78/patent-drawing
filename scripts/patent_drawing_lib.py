@@ -2925,11 +2925,24 @@ class Drawing:
         n = len(pts)
         if n < 2:
             return
+        # 꺾임점에서 gap 방지: 각 세그먼트를 다음 세그먼트 방향으로 0.02" 연장
+        OVERSHOOT = 0.02
         for i in range(n-2):
-            ax.plot([pts[i][0], pts[i+1][0]],
-                    [pts[i][1], pts[i+1][1]],
+            x0, y0 = pts[i]
+            x1, y1 = pts[i+1]
+            # 다음 세그먼트 방향으로 overshoot
+            if i + 2 < n:
+                nx, ny = pts[i+2]
+                dx = nx - x1
+                dy = ny - y1
+                dist = max((dx**2 + dy**2)**0.5, 1e-9)
+                ox = x1 + dx / dist * OVERSHOOT
+                oy = y1 + dy / dist * OVERSHOOT
+            else:
+                ox, oy = x1, y1
+            ax.plot([x0, ox], [y0, oy],
                     color=BOX_EDGE, lw=LW_ARR, linestyle=ls,
-                    solid_capstyle='butt', zorder=Z_ARROW)
+                    solid_capstyle='round', zorder=Z_ARROW)
         ax.annotate('', xy=pts[-1], xytext=pts[-2],
                     arrowprops=dict(arrowstyle='->', color=BOX_EDGE,
                                    lw=LW_ARR, linestyle=ls, mutation_scale=12),

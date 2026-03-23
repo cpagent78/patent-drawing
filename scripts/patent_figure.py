@@ -156,6 +156,94 @@ class PatentFigure:
         self._draw(output_path, positions)
         return output_path
 
+    def render_multi(self, *output_paths: str, split_at: int = None) -> list[str]:
+        """
+        Split a deep flow into multiple pages and render each as a separate PNG.
+
+        For flows with 9+ nodes (or when split_at is specified), automatically
+        splits the node list into roughly equal halves and renders each half
+        as a separate figure. A connector label (A) is added at the bottom of
+        the first figure and the top of the second to indicate continuation.
+
+        Args:
+            *output_paths: One output path per page (e.g. 'fig5a.png', 'fig5b.png').
+                           Currently supports exactly 2 pages.
+            split_at:      Optional index at which to split (0-based into self._order).
+                           Defaults to len(nodes) // 2.
+
+        Returns:
+            List of output paths that were written.
+
+        Example::
+
+            fig = PatentFigure('FIG. 5A')
+            # Add 12 nodes + edges ...
+            fig.render_multi('fig5a.png', 'fig5b.png')
+        """
+        if len(output_paths) < 2:
+            raise ValueError("render_multi requires at least 2 output paths")
+        if len(output_paths) > 2:
+            raise NotImplementedError("render_multi currently supports 2-page split only")
+
+        n = len(self._order)
+        idx = split_at if split_at is not None else n // 2
+
+        first_ids  = set(self._order[:idx])
+        second_ids = set(self._order[idx:])
+
+        # ── Page A ────────────────────────────────────────────────────────────
+        label_a = self.fig_label.replace('FIG.', 'FIG.').rstrip()
+        # Use "A" suffix if label doesn't already end with a letter
+        if not label_a[-1].isalpha():
+            label_a += 'A'
+        fig_a = PatentFigure(label_a, orientation=self.orientation, direction=self.direction)
+        for nid in self._order[:idx]:
+            nd = self._nodes[nid]
+            fig_a.node(nid, nd.text, shape=nd.shape)
+        # Only edges between nodes in first half
+        for e in self._edges:
+            if e.src_id in first_ids and e.dst_id in first_ids:
+                fig_a.edge(e.src_id, e.dst_id, label=e.label, bidir=e.bidir)
+        # Add connector node at bottom
+        _conn_id = '__cont_a__'
+        fig_a.node(_conn_id, '(A)\nCont\'d', shape='end')
+        # Connect last node of first half to connector
+        last_id = self._order[idx - 1]
+        fig_a.edge(last_id, _conn_id)
+        for cont in self._containers:
+            cont_ids_a = [cid for cid in cont.node_ids if cid in first_ids]
+            if cont_ids_a:
+                fig_a.container(cont.id, cont_ids_a, label=cont.label, pad=cont.pad)
+        fig_a.render(output_paths[0])
+
+        # ── Page B ────────────────────────────────────────────────────────────
+        label_b = self.fig_label.rstrip()
+        if not label_b[-1].isalpha():
+            label_b += 'B'
+        else:
+            label_b = label_b[:-1] + 'B'
+        fig_b = PatentFigure(label_b, orientation=self.orientation, direction=self.direction)
+        # Add connector node at top
+        _conn_id_b = '__cont_b__'
+        fig_b.node(_conn_id_b, '(A)\nCont\'d', shape='start')
+        for nid in self._order[idx:]:
+            nd = self._nodes[nid]
+            fig_b.node(nid, nd.text, shape=nd.shape)
+        # Connect connector to first node of second half
+        first_id_b = self._order[idx]
+        fig_b.edge(_conn_id_b, first_id_b)
+        # Only edges between nodes in second half
+        for e in self._edges:
+            if e.src_id in second_ids and e.dst_id in second_ids:
+                fig_b.edge(e.src_id, e.dst_id, label=e.label, bidir=e.bidir)
+        for cont in self._containers:
+            cont_ids_b = [cid for cid in cont.node_ids if cid in second_ids]
+            if cont_ids_b:
+                fig_b.container(cont.id + '_b', cont_ids_b, label=cont.label, pad=cont.pad)
+        fig_b.render(output_paths[1])
+
+        return list(output_paths[:2])
+
     # ── Step 1: Rank assignment with back-edge detection ──────────────────────
 
     def _assign_ranks(self):
@@ -531,7 +619,22 @@ class PatentFigure:
             (nd.box_ref.right for nd in self._nodes.values() if nd.box_ref), 
             default=self.BND_X2 - self.INNER_PAD
         )
-        skip_channel_x = all_right_edges + 0.35  # right side channel for skip edges
+        # Base right channel x — first skip uses +0.50 (≥ 0.44" min segment)
+        # Each additional skip edge gets its own lane (+0.45" per lane) for clear visual separation
+        _skip_channel_base_x = all_right_edges + 0.50
+        # Clamp to boundary
+        _skip_channel_max_x = self.BND_X2 - 0.10
+        # Index skip edges so each gets its own channel lane
+        # Sort by rank span (smallest span = innermost/closest channel)
+        _skip_edges = [(e, self._nodes[e.src_id], self._nodes[e.dst_id])
+                       for e in self._edges
+                       if not e.is_back and (self._nodes[e.dst_id].rank - self._nodes[e.src_id].rank) > 1
+                       and self._nodes[e.src_id].box_ref and self._nodes[e.dst_id].box_ref]
+        _skip_edges.sort(key=lambda t: t[2].rank - t[1].rank)  # smallest span first
+        _skip_channel_map = {}  # edge id → channel_x
+        for idx_s, (e_s, _, _) in enumerate(_skip_edges):
+            ch_x = min(_skip_channel_max_x, _skip_channel_base_x + idx_s * 0.45)
+            _skip_channel_map[id(e_s)] = ch_x
 
         for e in self._edges:
             if e.is_back:
@@ -548,6 +651,8 @@ class PatentFigure:
 
             # Check if this edge skips over intermediate nodes
             is_skip = rank_diff > 1
+            # Per-edge skip channel (fan-out to avoid overlap)
+            skip_channel_x = _skip_channel_map.get(id(e), _skip_channel_base_x)
 
             # LR direction: use horizontal primary axis
             if self.direction == 'LR':
@@ -693,14 +798,18 @@ class PatentFigure:
 
                 # Route: src bottom-left corner → left channel → up → dst left_mid
                 # Use bottom-left of src box for departure (avoids overlapping label positions)
-                channel_x = max(min_channel_x, base_x - 0.40 - i * 0.28)
+                # i=0: innermost (closest) channel; i=1: outer channel (further left)
+                # 0.40" initial offset + 0.35" per extra loop ensures visible separation
+                channel_x = max(min_channel_x, base_x - 0.40 - i * 0.35)
 
                 # For diamonds, exit from the bottom (straight down first, then left)
                 # For boxes, exit from the left_mid
                 if src_nd.shape == 'diamond':
+                    # Ensure minimum 0.44" downward segment before turning left
+                    down_y = sb.bot - max(0.50, (sb.bot - db.cy) * 0.15)
                     d.arrow_route([
                         sb.bot_mid(),
-                        (sb.cx, sb.bot - 0.20),
+                        (sb.cx, down_y),
                         ('left_to', channel_x),
                         ('up_to', db.cy),
                         db.left_mid(),

@@ -327,3 +327,186 @@ d = Drawing("fig1.png", fig_num="1", orientation='landscape')
 
 - `portrait` (기본): 세로 8.5" × 11" — 블록다이어그램, 플로우차트, bus
 - `landscape`: 가로 11" × 8.5" — 파이프라인, 시퀀스, swimlane, 타임라인
+
+---
+
+## PatentFigure — 선언적 플로우차트 엔진
+
+`patent_figure.py`는 노드와 엣지만 선언하면 자동으로 레이아웃과 라우팅을 처리하는 고수준 엔진이다.
+특허 플로우차트(flowchart)에 최적화. `patent_drawing_lib.py`의 저수준 API 위에서 동작한다.
+
+### Import
+
+```python
+import sys
+sys.path.insert(0, '<skill_dir>/scripts')
+from patent_figure import PatentFigure
+```
+
+### 기본 사용법
+
+```python
+fig = PatentFigure('FIG. 6')
+
+# 노드 추가 (순서가 레이아웃 순서)
+fig.node('S400', '400\nStart', shape='start')
+fig.node('S410', '410\nProcess Input')
+fig.node('S420', '420\nValid?', shape='diamond')
+fig.node('S430', '430\nContinue')
+fig.node('S440', '440\nEnd', shape='end')
+
+# 엣지 추가 (자동 back-edge 탐지)
+fig.edge('S400', 'S410')
+fig.edge('S410', 'S420')
+fig.edge('S420', 'S430', label='Yes')
+fig.edge('S420', 'S410', label='No')   # 루프백 자동 탐지
+fig.edge('S430', 'S440')
+
+# 렌더링
+fig.render('fig6.png')
+```
+
+### 도형 옵션 (shape=)
+
+| shape | 외형 | 용도 |
+|-------|------|------|
+| `'process'` (기본) | 사각형 | 일반 처리 단계 |
+| `'start'` | 둥근 사각형 | 시작 노드 |
+| `'end'` | 둥근 사각형 | 종료 노드 |
+| `'diamond'` | 마름모 | 조건 분기 (Yes/No) |
+| `'oval'` | 타원 | 대안 시작/종료 |
+| `'cylinder'` | 실린더 | 데이터베이스 |
+
+### 방향 (direction=)
+
+```python
+# 위→아래 플로우차트 (기본)
+fig = PatentFigure('FIG. 6', direction='TB')
+
+# 왼→오른 블록 다이어그램
+fig = PatentFigure('FIG. 2', direction='LR')
+```
+
+- **TB (top-bottom)**: 플로우차트, 워크플로우에 적합. 루프백 자동 지원.
+- **LR (left-right)**: 데이터 파이프라인, 아키텍처 계층 다이어그램. 3-4 컬럼 권장.
+
+### 양방향 화살표 (bidir=True)
+
+```python
+fig.edge('A', 'B', bidir=True)   # ↔ 양쪽 화살촉
+```
+
+### 컨테이너 그룹핑
+
+```python
+# 여러 노드를 점선 박스로 묶기 (레이아웃 후 장식적 추가)
+fig.container('grp1', ['S410', 'S420'], label='210\nProcessing Layer')
+```
+
+- `id`: 컨테이너 고유 ID
+- `node_ids`: 포함할 노드 ID 목록
+- `label`: 박스 위에 표시할 텍스트 (참조번호\n이름 형식 권장)
+- `pad`: 노드 주변 여백 (기본 0.14")
+
+### 딥 플로우 자동 분할 (`render_multi`)
+
+9개 이상 노드는 단일 페이지에 물리적으로 들어가지 않을 수 있다.
+`render_multi()`를 사용하면 자동으로 두 페이지로 분할한다.
+
+```python
+fig = PatentFigure('FIG. 5')
+# 12개 노드 추가...
+fig.edge(...)
+
+# 자동 분할: fig5a.png (앞부분) + fig5b.png (뒷부분)
+fig.render_multi('fig5a.png', 'fig5b.png')
+
+# 분할 위치 지정 (0-based 인덱스)
+fig.render_multi('fig5a.png', 'fig5b.png', split_at=7)
+```
+
+- 각 페이지 하단/상단에 `(A) Cont'd` 연결 심볼 자동 추가
+- 분할 위치는 `split_at` 파라미터로 조정 (기본: 중간)
+- 현재 2페이지까지만 지원
+
+### 루프백 (Loop-back) 자동 처리
+
+```python
+fig.edge('S420', 'S410', label='Retry')  # 뒤로 가는 엣지: 자동 감지
+```
+
+- DFS로 back-edge 자동 감지
+- 좌측 채널(left side channel)로 자동 라우팅
+- 2중 루프: 각 루프가 별도 채널 사용 (내부 루프 가까이, 외부 루프 멀리)
+
+### skip-rank 엣지
+
+```python
+# rank 차이가 2 이상인 엣지 — 중간 박스를 통과하지 않도록 우측 채널 라우팅
+fig.edge('S100', 'S400', label='Skip')   # rank 0 → rank 3
+fig.edge('S200', 'S500', label='Fast')   # rank 1 → rank 4 (별도 채널)
+```
+
+- 여러 skip-rank 엣지는 각각 다른 우측 채널 레인 할당
+- 작은 rank 차이 = 안쪽 레인, 큰 rank 차이 = 바깥쪽 레인
+
+### 레이아웃 규칙
+
+1. **노드 추가 순서 = 레이아웃 순서**: `fig.node()` 호출 순서대로 위에서 아래로 배치
+2. **같은 레이어**: 동시에 에지를 받는 노드들은 같은 행에 나란히 배치
+3. **자동 폰트 축소**: 공간이 부족하면 8pt→7pt→6pt 자동 시도 (10pt 이하 경고는 무시 가능)
+4. **컨테이너는 레이아웃에 영향 없음**: 노드 위치 결정 후 장식적으로 추가
+
+### 한계 및 권고사항
+
+| 한계 | 설명 | 권고 |
+|------|------|------|
+| 9+ 노드 단일 라인 텍스트 제한 | 물리적 공간 부족 | `render_multi()` 사용 또는 텍스트 단축 |
+| LR 레이아웃 5컬럼 이상 | 텍스트 압축 발생 | 3-4컬럼 권장, 짧은 라벨 사용 |
+| 2중 루프 시각적 혼잡 | 루프 경로가 노드와 근접 | 루프 수를 2개 이하로 제한 |
+| T-junction 경고 | N-way 분기 시 발생 | 경고는 무시 가능 (시각적으로 OK) |
+| LR 루프백 | LR 방향에서 back-edge 미지원 | TB 방향 사용 |
+| 10pt 폰트 경고 | 딥 플로우에서 자동 축소 시 발생 | 텍스트 단축 또는 render_multi 사용 |
+
+### 완전한 예제
+
+```python
+import sys
+sys.path.insert(0, '<skill_dir>/scripts')
+from patent_figure import PatentFigure
+
+# 특허 주문 처리 플로우 FIG. 3
+fig = PatentFigure('FIG. 3')
+
+fig.node('S500', '500\nReceive Order', shape='start')
+fig.node('S502', '502\nValidate Input')
+fig.node('S504', '504\nCheck Inventory', shape='diamond')
+fig.node('S506', '506\nAlert: Out of Stock')
+fig.node('S508', '508\nProcess Payment', shape='diamond')
+fig.node('S510', '510\nNotify Failure')
+fig.node('S512', '512\nCreate Shipment')
+fig.node('S514', '514\nEnd', shape='end')
+
+fig.edge('S500', 'S502')
+fig.edge('S502', 'S504')
+fig.edge('S504', 'S506', label='No')
+fig.edge('S504', 'S508', label='Yes')
+fig.edge('S506', 'S502')             # 루프백 자동 탐지
+fig.edge('S508', 'S510', label='No')
+fig.edge('S508', 'S512', label='Yes')
+fig.edge('S510', 'S508')             # 루프백
+fig.edge('S512', 'S514')
+
+fig.render('fig3.png')
+```
+
+### patent_drawing_lib vs PatentFigure 선택 기준
+
+| 상황 | 권장 도구 |
+|------|---------|
+| 플로우차트, 워크플로우 | **PatentFigure** |
+| 시스템 아키텍처 블록다이어그램 | `patent_drawing_lib.layout()` |
+| 시퀀스 다이어그램 | `patent_drawing_lib.sequence_diagram()` |
+| 수평 파이프라인 (3-5 단계) | `patent_drawing_lib.horizontal_pipeline_flow()` |
+| 수동 좌표가 필요한 특수 레이아웃 | `patent_drawing_lib` 직접 사용 |
+| 9+ 노드 플로우차트 | **PatentFigure + render_multi()** |

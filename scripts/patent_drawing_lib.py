@@ -1821,17 +1821,19 @@ class Drawing:
             self._no_ref_boxes.add(id(b))
             header_boxes.append(b)
 
-        # 2. 레인 경계선 (수직선)
+        # 2. 레인 경계선 (수직선) — 마지막 박스 아래까지만
+        ARR_GAP = 0.50
+        line_bot = y_top - header_h - len(rows) * (row_h + ARR_GAP) - 0.20
         for i in range(n_lanes + 1):
             lx = x_start + i * lane_w
-            self._cmds.append(('line', lx, y_top - header_h, lx, y_top - header_h - (len(rows)+1)*(row_h+row_gap), '-'))
+            self._cmds.append(('line', lx, y_top - header_h, lx, line_bot, '-'))
 
         # 3. 단계 박스 배치
         step_boxes = []
         # 3. 박스 배치 — 같은 시점 박스는 같은 y행에 나란히
         # connections에서 연결된 src→dst 쌍을 보고, dst가 이전 행과 같은 y에 올 수 있으면 같은 행
         cur_y = y_top - header_h - row_gap
-        ARR_GAP = 0.50  # 행 간 화살표 공간 (반으로 줄임)
+        # ARR_GAP은 위에서 이미 정의됨 (0.50)
 
         for row in rows:
             li = row.get('lane', 0)

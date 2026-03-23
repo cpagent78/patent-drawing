@@ -314,3 +314,16 @@ d.layer(x1, y1, x2, y2, label='808 Storage', dash='dotted')
 | callout이 대상에 안 닿음 | tilde 문자 → 폰트 의존 | sine wave 직접 그리기 |
 | 버스 callout 위치 어색 | LLM 수동 배치 | ref_callout_bus() 빈 공간 자동 탐색 |
 | 점선 계층 구분 안 됨 | boundary/layer 동일 스타일 | layer dash-dot 패턴 |
+
+## 페이지 방향 (Orientation)
+
+```python
+# 세로 (기본, 8.5" × 11")
+d = Drawing("fig1.png", fig_num="1")
+
+# 가로 (11" × 8.5") — 수평 파이프라인, 타임라인 등에 적합
+d = Drawing("fig1.png", fig_num="1", orientation='landscape')
+```
+
+- `portrait` (기본): 세로 8.5" × 11" — 블록다이어그램, 플로우차트, bus
+- `landscape`: 가로 11" × 8.5" — 파이프라인, 시퀀스, swimlane, 타임라인

@@ -74,10 +74,11 @@ class PatentFigure:
     # Layout constants
     H_GAP = 0.50           # horizontal gap for same-rank nodes
     LOOPBACK_MARGIN = 0.55 # left margin for loop-back channel
-    DIAMOND_W = 2.60       # diamond width
-    DIAMOND_H = 1.30       # diamond height
-    BOX_PAD_X = 0.30       # text padding inside boxes
-    BOX_PAD_Y = 0.20
+    DIAMOND_W = 2.20       # diamond width
+    DIAMOND_H = 1.10       # diamond height
+    BOX_PAD_X = 0.22       # text padding inside boxes
+    BOX_PAD_Y = 0.14
+    DEFAULT_FS = 8         # default font size (patent-scale)
 
     def __init__(self, fig_label: str = 'FIG. 1', orientation: str = 'portrait'):
         self.fig_label = fig_label
@@ -187,17 +188,17 @@ class PatentFigure:
         """Compute width/height for each node based on text + shape."""
         # Use a temporary Drawing for text measurement
         d = Drawing('/dev/null')
+        fs = self.DEFAULT_FS
 
         for nd in self._nodes.values():
             if nd.shape == 'diamond':
                 nd._w = self.DIAMOND_W
                 nd._h = self.DIAMOND_H
             else:
-                tw, th = d.measure_text(nd.text)
+                tw, th = d.measure_text(nd.text, fs)
                 nd._w = tw + self.BOX_PAD_X * 2
-                nd._h = max(th + self.BOX_PAD_Y * 2, 0.55)
-                # Minimum width for aesthetics
-                nd._w = max(nd._w, 2.00)
+                nd._h = max(th + self.BOX_PAD_Y * 2, 0.45)
+                nd._w = max(nd._w, 1.60)
 
         # Unify widths for process/start/end boxes (not diamonds)
         box_nodes = [nd for nd in self._nodes.values() if nd.shape != 'diamond']
@@ -282,6 +283,8 @@ class PatentFigure:
         """Create Drawing, render all nodes and edges, save."""
         d = Drawing(output_path, fig_num=self.fig_label.replace('FIG. ', ''))
 
+        fs = self.DEFAULT_FS
+
         # Draw nodes
         for nid in self._order:
             nd = self._nodes[nid]
@@ -290,19 +293,19 @@ class PatentFigure:
             if nd.shape in ('start', 'end'):
                 x = cx - nd._w / 2
                 y = cy - nd._h / 2
-                nd.box_ref = d.rounded_rect(x, y, nd._w, nd._h, nd.text, radius=0.25)
+                nd.box_ref = d.rounded_rect(x, y, nd._w, nd._h, nd.text, fs=fs, radius=0.20)
             elif nd.shape == 'diamond':
-                nd.box_ref = d.decision_diamond(cx, cy, nd._w, nd._h, nd.text)
+                nd.box_ref = d.decision_diamond(cx, cy, nd._w, nd._h, nd.text, fs=fs)
             elif nd.shape == 'oval':
-                nd.box_ref = d.oval(cx, cy, nd._w, nd._h, nd.text)
+                nd.box_ref = d.oval(cx, cy, nd._w, nd._h, nd.text, fs=fs)
             elif nd.shape == 'cylinder':
                 x = cx - nd._w / 2
                 y = cy - nd._h / 2
-                nd.box_ref = d.database_cylinder(x, y, nd._w, nd._h, nd.text)
+                nd.box_ref = d.database_cylinder(x, y, nd._w, nd._h, nd.text, fs=fs)
             else:  # process (default box)
                 x = cx - nd._w / 2
                 y = cy - nd._h / 2
-                nd.box_ref = d.box(x, y, nd._w, nd._h, nd.text)
+                nd.box_ref = d.box(x, y, nd._w, nd._h, nd.text, fs=fs)
 
         # Draw forward edges (straight/elbow arrows)
         for e in self._edges:
@@ -331,24 +334,17 @@ class PatentFigure:
 
             # Edge label (Yes/No)
             if e.label:
-                src_cx, src_cy = positions[e.src_id]
-                dst_cx, dst_cy = positions[e.dst_id]
-
                 if src_nd.shape == 'diamond':
-                    # Label near the diamond exit point
                     if abs(sb.cx - db.cx) < 0.1:
-                        # Vertical exit (bottom)
-                        d.label(sb.cx + 0.15, sb.bot - 0.12, e.label, ha='left')
+                        d.label(sb.cx + 0.12, sb.bot - 0.08, e.label, ha='left', fs=fs)
                     else:
-                        # Horizontal exit
                         if db.cx < sb.cx:
-                            d.label(sb.left - 0.10, sb.cy + 0.12, e.label, ha='right')
+                            d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=fs)
                         else:
-                            d.label(sb.right + 0.10, sb.cy + 0.12, e.label, ha='left')
+                            d.label(sb.right + 0.08, sb.cy + 0.10, e.label, ha='left', fs=fs)
                 else:
-                    # Generic: label at midpoint
                     mid_y = (sb.bot + db.top) / 2
-                    d.label(sb.cx + 0.15, mid_y, e.label, ha='left')
+                    d.label(sb.cx + 0.12, mid_y, e.label, ha='left', fs=fs)
 
         # Draw back-edges (loop-back through left channel)
         back_edges = [e for e in self._edges if e.is_back]
@@ -378,7 +374,7 @@ class PatentFigure:
 
                 # Label at branch point
                 if e.label:
-                    d.label(sb.left - 0.10, sb.cy + 0.12, e.label, ha='right')
+                    d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=fs)
 
         # Boundary + label
         d.boundary(self.BND_X1, self.BND_Y1, self.BND_X2, self.BND_Y2)

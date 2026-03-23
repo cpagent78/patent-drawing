@@ -1125,7 +1125,7 @@ class Drawing:
                 max_right = max(max_right, cmd[3])
 
         # callout/label 예상 폭 반영 (렌더링 전이라 실측 불가 → 예상치)
-        CALLOUT_EST = 0.35  # callout 텍스트 + 물결선 예상 폭
+        CALLOUT_EST = 0.50  # callout 텍스트 + 물결선 예상 폭
         for cmd in self._cmds:
             if cmd[0] == 'ref_callout':
                 _, box, ref_num, side_enc, offset, fs = cmd
@@ -1821,12 +1821,10 @@ class Drawing:
             self._no_ref_boxes.add(id(b))
             header_boxes.append(b)
 
-        # 2. 레인 경계선 (수직선) — 마지막 박스 아래까지만
+        # 2. 레인 경계선 — 배치 후 실제 최하단까지 연장 (Step 3 이후 업데이트)
         ARR_GAP = 0.50
-        line_bot = y_top - header_h - len(rows) * (row_h + ARR_GAP) - 0.20
-        for i in range(n_lanes + 1):
-            lx = x_start + i * lane_w
-            self._cmds.append(('line', lx, y_top - header_h, lx, line_bot, '-'))
+        line_bot = None  # Step 3 후 결정
+        # 레인 구분선은 Step 3 후 실제 최하단을 알고 나서 추가 (아래에서)
 
         # 3. 단계 박스 배치
         step_boxes = []
@@ -1844,6 +1842,15 @@ class Drawing:
             b = self.box(box_x, box_y, box_w, row_h, text, fs)
             step_boxes.append(b)
             cur_y = box_y - ARR_GAP
+
+        # 3b. 레인 구분선 — 실제 최하단 박스 기준
+        if step_boxes:
+            line_bot = min(b.bot for b in step_boxes) - 0.30
+        else:
+            line_bot = y_top - header_h - 2.0
+        for i in range(n_lanes + 1):
+            lx = x_start + i * lane_w
+            self._cmds.append(('line', lx, y_top - header_h, lx, line_bot, '-'))
 
         # 4. connections 화살표
         if connections:

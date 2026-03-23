@@ -1541,6 +1541,19 @@ class Drawing:
                     ha='right', va='center',
                     fontsize=fs, fontweight=FW, zorder=Z_FIG_LABEL + 2)
 
+    def decision_diamond(self, cx, cy, w, h, text="", fs=None) -> BoxRef:
+        """
+        다이아몬드(마름모) 조건 분기 도형.
+        플로우차트에서 Yes/No 판단에 사용.
+        BoxRef 반환 → 화살표 연결 가능.
+        사용:
+            dm = d.decision_diamond(4.0, 5.0, 2.0, 1.2, 'S410\nPaying?')
+        """
+        b = BoxRef(cx - w/2, cy - h/2, w, h)
+        self._box_refs.append(b)
+        self._cmds.append(('diamond', cx, cy, w, h, text, fs or FS_BODY, b))
+        return b
+
     def brace(self, x1, y1, x2, y2, side='right', label="", fs=None):
         """
         중괄호(brace) — 그룹 범위 표시.
@@ -2246,6 +2259,9 @@ class Drawing:
             elif cmd[0] == 'brace':
                 _, x1, y1, x2, y2, side, label, fs = cmd
                 self._render_brace(ax, x1, y1, x2, y2, side, label, fs)
+            elif cmd[0] == 'diamond':
+                _, cx, cy, w, h, text, fs, b = cmd
+                self._render_diamond(ax, cx, cy, w, h, text, fs)
             elif cmd[0] == 'ref_callout':
                 _, box, ref_num, side, offset, fs = cmd
                 self._render_ref_callout(ax, box, ref_num, side, offset, fs)
@@ -2662,6 +2678,21 @@ class Drawing:
             self._label_extents.append(new_ext)
         except Exception:
             pass
+
+    def _render_diamond(self, ax, cx, cy, w, h, text, fs):
+        """마름모(다이아몬드) 렌더링."""
+        from matplotlib.patches import Polygon
+        pts = [(cx, cy + h/2), (cx + w/2, cy), (cx, cy - h/2), (cx - w/2, cy)]
+        ax.add_patch(Polygon(pts, closed=True,
+                             facecolor=BOX_FILL, edgecolor=BOX_EDGE,
+                             linewidth=LW_BOX, zorder=Z_BOX_EDGE))
+        if text:
+            tw, th, dx_off, dy_off = self._get_text_rect('diamond', w, h)
+            fs_use = self._fit_font(text, tw, th, fs)
+            ax.text(cx + dx_off, cy + dy_off, text,
+                    ha='center', va='center',
+                    fontsize=fs_use, fontweight=FW,
+                    multialignment='center', zorder=Z_BOX_TEXT)
 
     def _render_brace(self, ax, x1, y1, x2, y2, side, label, fs):
         """중괄호 — matplotlib path로 그림."""
@@ -3109,6 +3140,8 @@ class Drawing:
             # 텍스트 중심을 몸체 중앙으로 (상단 타원이 위로 돌출하므로 약간 아래)
             cy_offset = -ry * 0.3
             return w - 0.22, text_h, 0, cy_offset
+        elif shape_type == 'diamond':
+            return w * 0.55, h * 0.45, 0, 0
         elif shape_type == 'cloud':
             return w * 0.65, h * 0.50, 0, 0
         elif shape_type == 'oval':

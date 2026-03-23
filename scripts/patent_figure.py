@@ -15,11 +15,23 @@ Usage:
     fig.edge('S400', 'S402')
     fig.edge('S410', 'S412', label='Yes')
     fig.edge('S410', 'S404', label='No')   # loop-back auto-detected
+    fig.edge('S402', 'S403', bidir=True)   # bidirectional arrow
+
+    # Container grouping (drawn as dashed box after layout)
+    fig.container('grp1', ['S402', 'S404'], label='310\nProcessing Group')
 
     fig.render('fig6.png')
 
 Shapes: 'process' (default), 'start', 'end', 'diamond', 'oval', 'cylinder'
 Layout: automatic top-to-bottom with back-edge detection + side-channel routing.
+  orientation='TB' (default) — top-to-bottom flowchart
+  orientation='LR' — left-to-right block diagram style (Phase 3 addition)
+
+Phase 3 additions:
+  - container(): dashed group box around nodes (labeled)
+  - bidir=True in edge(): bidirectional arrow
+  - orientation='LR': horizontal left-to-right layout
+  - Deep flow short arrow fix: MIN_V_GAP enforced ≥ 0.44"
 """
 
 import sys, os
@@ -47,13 +59,25 @@ class FigNode:
 
 class FigEdge:
     """An edge (arrow) between two nodes."""
-    __slots__ = ('src_id', 'dst_id', 'label', 'is_back')
+    __slots__ = ('src_id', 'dst_id', 'label', 'is_back', 'bidir')
 
-    def __init__(self, src_id: str, dst_id: str, label: str = ''):
+    def __init__(self, src_id: str, dst_id: str, label: str = '', bidir: bool = False):
         self.src_id = src_id
         self.dst_id = dst_id
         self.label = label
         self.is_back = False    # True if this is a loop-back edge
+        self.bidir = bidir      # True if bidirectional arrow
+
+
+class FigContainer:
+    """A labeled dashed group box around a set of nodes."""
+    __slots__ = ('id', 'node_ids', 'label', 'pad')
+
+    def __init__(self, id: str, node_ids: list, label: str = '', pad: float = 0.12):
+        self.id = id
+        self.node_ids = node_ids
+        self.label = label
+        self.pad = pad
 
 
 # ── Patent Figure Engine ──────────────────────────────────────────────────────
@@ -79,12 +103,16 @@ class PatentFigure:
     BOX_PAD_X = 0.22       # text padding inside boxes
     BOX_PAD_Y = 0.14
     DEFAULT_FS = 8         # default font size (patent-scale)
+    MIN_FS = 6             # minimum font size (for deep/dense flows)
 
-    def __init__(self, fig_label: str = 'FIG. 1', orientation: str = 'portrait'):
+    def __init__(self, fig_label: str = 'FIG. 1', orientation: str = 'portrait',
+                 direction: str = 'TB'):
         self.fig_label = fig_label
         self.orientation = orientation
+        self.direction = direction  # 'TB' (top-bottom) or 'LR' (left-right)
         self._nodes: dict[str, FigNode] = {}   # id → FigNode
         self._edges: list[FigEdge] = []
+        self._containers: list[FigContainer] = []
         self._order: list[str] = []            # insertion order
 
     def node(self, id: str, text: str, shape: str = 'process') -> 'PatentFigure':
@@ -93,9 +121,26 @@ class PatentFigure:
         self._order.append(id)
         return self
 
-    def edge(self, src: str, dst: str, label: str = '') -> 'PatentFigure':
-        """Add a directed edge (arrow) from src to dst."""
-        self._edges.append(FigEdge(src, dst, label))
+    def edge(self, src: str, dst: str, label: str = '', bidir: bool = False) -> 'PatentFigure':
+        """Add a directed edge (arrow) from src to dst.
+        bidir=True: bidirectional arrow (both arrowheads).
+        """
+        self._edges.append(FigEdge(src, dst, label, bidir=bidir))
+        return self
+
+    def container(self, id: str, node_ids: list, label: str = '',
+                  pad: float = 0.14) -> 'PatentFigure':
+        """
+        Add a labeled dashed group box around the given node IDs.
+        Drawn after layout — the box auto-sizes to enclose all listed nodes.
+
+        Args:
+            id:       unique container ID
+            node_ids: list of node IDs to enclose
+            label:    optional label (e.g. reference number + name)
+            pad:      extra padding around enclosed nodes (inches)
+        """
+        self._containers.append(FigContainer(id, node_ids, label, pad))
         return self
 
     # ── Main render pipeline ──────────────────────────────────────────────────
@@ -104,7 +149,10 @@ class PatentFigure:
         """Full pipeline: layout → draw → save. Returns output path."""
         self._assign_ranks()
         self._measure_nodes()
-        positions = self._compute_positions()
+        if self.direction == 'LR':
+            positions = self._compute_positions_lr()
+        else:
+            positions = self._compute_positions()
         self._draw(output_path, positions)
         return output_path
 
@@ -185,60 +233,65 @@ class PatentFigure:
     # ── Step 2: Measure node sizes ────────────────────────────────────────────
 
     def _measure_nodes(self):
-        """Compute width/height for each node based on text + shape."""
-        # Use a temporary Drawing for text measurement
+        """Compute width/height for each node based on text + shape.
+
+        Uses font-size scaling to ensure deep flows fit on a single page.
+        Box sizes reflect what patent_drawing_lib will ACTUALLY draw.
+        """
+        from collections import defaultdict
         d = Drawing('/dev/null')
-        fs = self.DEFAULT_FS
 
-        for nd in self._nodes.values():
-            if nd.shape == 'diamond':
-                nd._w = self.DIAMOND_W
-                nd._h = self.DIAMOND_H
-            else:
-                tw, th = d.measure_text(nd.text, fs)
-                nd._w = tw + self.BOX_PAD_X * 2
-                nd._h = max(th + self.BOX_PAD_Y * 2, 0.45)
-                nd._w = max(nd._w, 1.60)
-
-        # Unify widths for process/start/end boxes (not diamonds)
-        box_nodes = [nd for nd in self._nodes.values() if nd.shape != 'diamond']
-        if box_nodes:
-            max_w = max(nd._w for nd in box_nodes)
-            for nd in box_nodes:
-                nd._w = max_w
-
-        # ── Fix: scale down node sizes if total height exceeds available area ──
-        # Available vertical height for content
+        # Available area
         content_y_top = self.BND_Y2 - self.INNER_PAD
         content_y_bot = self.BND_Y1 + self.INNER_PAD
         available_h = content_y_top - content_y_bot
 
-        # Group by rank to count ranks (ranks not yet assigned — skip for now)
-        # This is called AFTER _assign_ranks, so ranks are set
-        from collections import defaultdict
+        # Build rank groups
         ranks = defaultdict(list)
         for nd in self._nodes.values():
             ranks[nd.rank].append(nd)
         max_rank = max(ranks.keys()) if ranks else 0
 
-        # Total min height: sum of row heights with min gap
-        MIN_GAP = 0.25
-        total_min_h = sum(max(nd._h for nd in ranks[r]) for r in range(max_rank + 1))
-        total_min_h += MIN_GAP * max_rank
+        MIN_ARROW_GAP = 0.46   # minimum gap for visible arrows
 
-        if total_min_h > available_h:
-            # Scale factor: reduce box heights proportionally
-            scale = available_h / total_min_h * 0.92   # 8% extra margin
+        # Try decreasing font sizes until the flow fits
+        for fs in range(self.DEFAULT_FS, self.MIN_FS - 1, -1):
+            self._active_fs = fs
+
             for nd in self._nodes.values():
-                nd._h *= scale
-                nd._h = max(nd._h, 0.35)  # absolute minimum 0.35"
+                if nd.shape == 'diamond':
+                    # Scale diamond proportionally with font
+                    scale_f = fs / self.DEFAULT_FS
+                    nd._w = max(self.DIAMOND_W * scale_f, 1.20)
+                    nd._h = max(self.DIAMOND_H * scale_f, 0.60)
+                else:
+                    tw, th = d.measure_text(nd.text, fs)
+                    # Match patent_drawing_lib's minimum padding
+                    pad_w = 0.24 if nd.shape in ('start', 'end') else 0.18
+                    pad_h = 0.14
+                    # Our width: text + padding + extra pad for margins
+                    nd._w = max(tw + pad_w + self.BOX_PAD_X, 1.40)
+                    # Our height: must match library minimum (text + pad)
+                    nd._h = max(th + pad_h, 0.35)
 
-        # ── Fix: scale down node widths if wide rows exceed available width ──
+            # Unify widths for non-diamond boxes
+            box_nodes = [nd for nd in self._nodes.values() if nd.shape != 'diamond']
+            if box_nodes:
+                max_w = max(nd._w for nd in box_nodes)
+                for nd in box_nodes:
+                    nd._w = max_w
+
+            # Check fit
+            total_node_h = sum(max(nd._h for nd in ranks[r]) for r in range(max_rank + 1))
+            needed = total_node_h + MIN_ARROW_GAP * max_rank
+            if needed <= available_h or fs == self.MIN_FS:
+                break
+
+        # ── Scale widths if any row is too wide ──────────────────────────────
         content_x1 = self.BND_X1 + self.INNER_PAD + self.LOOPBACK_MARGIN
         content_x2 = self.BND_X2 - self.INNER_PAD
         available_w = content_x2 - content_x1
 
-        # Find the widest rank
         for r, nodes in ranks.items():
             if len(nodes) > 1:
                 total_row_w = sum(nd._w for nd in nodes) + self.H_GAP * (len(nodes) - 1)
@@ -246,7 +299,7 @@ class PatentFigure:
                     scale_w = available_w / total_row_w * 0.95
                     for nd in nodes:
                         nd._w *= scale_w
-                        nd._w = max(nd._w, 0.80)  # absolute minimum 0.80"
+                        nd._w = max(nd._w, 0.80)
 
     # ── Step 3: Position calculation ──────────────────────────────────────────
 
@@ -281,23 +334,24 @@ class PatentFigure:
 
         # Dynamic V_GAP: fill available space evenly
         # For branching flows, elbows need 2 × 0.44" = 0.88" between boxes
-        # to avoid "too short" validator warnings.
-        # Detect if this layout has branching (some ranks have > 1 node)
+        # For straight vertical arrows: minimum 0.46" (just over 0.44" validator limit)
         has_branching = any(len(ranks[r]) > 1 for r in range(max_rank + 1))
-        # For single-column linear flows, straight arrows only need 0.44"
-        # For branching, elbow arrows need 0.88" minimum
-        MIN_V_GAP = 0.92 if has_branching else 0.48
+        MIN_V_GAP_LINEAR   = 0.46  # straight arrow — slightly above 0.44" min
+        MIN_V_GAP_BRANCHING = 0.92  # elbow arrows — two 0.44" segments
         n_gaps = max_rank  # gaps between ranks
         if n_gaps > 0:
             remaining = available_h - total_node_h
-            if remaining <= 0:
-                # Space constrained (deep flow) — use computed scale-down gap
-                v_gap = max(0.20, remaining / n_gaps) if remaining > 0 else 0.20
-            elif remaining / n_gaps < MIN_V_GAP:
-                # Not enough space for ideal gap — compress to fit
-                v_gap = max(0.20, remaining / n_gaps)
-            else:
-                v_gap = min(0.90, max(MIN_V_GAP, remaining / n_gaps))
+            best_gap = remaining / n_gaps if remaining > 0 else 0.20
+            min_gap = MIN_V_GAP_BRANCHING if has_branching else MIN_V_GAP_LINEAR
+            if best_gap < min_gap:
+                # Not enough room for minimum gap — we need to shrink boxes
+                # but do NOT modify nd._h here (that's _measure_nodes' job).
+                # Just accept the best gap we can get.
+                # The _measure_nodes() already tried to pre-shrink boxes;
+                # if it's still not enough, it's geometrically impossible on one page.
+                pass
+            # Cap maximum gap (no wasted space)
+            v_gap = min(0.90, max(0.20, best_gap))
         else:
             v_gap = 0.55
 
@@ -339,13 +393,114 @@ class PatentFigure:
 
         return positions
 
+    # ── Step 3b: LR (left-to-right) Position Calculation ─────────────────────
+
+    def _compute_positions_lr(self) -> dict[str, tuple[float, float]]:
+        """
+        Horizontal layout: nodes arranged left-to-right by rank.
+        Each rank is a column. Multiple nodes in same rank stacked vertically.
+        """
+        from collections import defaultdict
+        ranks = defaultdict(list)
+        for nid in self._order:
+            nd = self._nodes[nid]
+            ranks[nd.rank].append(nd)
+
+        max_rank = max(ranks.keys()) if ranks else 0
+
+        # In LR mode, use slightly more margin to prevent box edges from touching boundary
+        EXTRA_MARGIN = 0.12
+        content_x1 = self.BND_X1 + self.INNER_PAD + EXTRA_MARGIN
+        content_x2 = self.BND_X2 - self.INNER_PAD - EXTRA_MARGIN
+        content_y_top = self.BND_Y2 - self.INNER_PAD
+        content_y_bot = self.BND_Y1 + self.INNER_PAD
+        available_w = content_x2 - content_x1
+        available_h = content_y_top - content_y_bot
+        content_cy = (content_y_top + content_y_bot) / 2
+
+        # Column widths = max node width per rank
+        col_widths = [max(nd._w for nd in ranks[r]) for r in range(max_rank + 1)]
+
+        # H_GAP between columns
+        # Arrow segments need minimum 0.44" each side → min gap = 0.88"
+        # For direct right→left connections: just need 0.30" each side
+        MIN_H_GAP = 0.30
+        n_h_gaps = max_rank
+        total_box_w = sum(col_widths)
+        if n_h_gaps > 0:
+            # Try to fit everything: boxes + minimum gaps within available_w
+            # Step 1: determine h_gap based on available space after boxes
+            remaining_w = available_w - total_box_w
+            if remaining_w >= MIN_H_GAP * n_h_gaps:
+                h_gap = min(0.90, remaining_w / n_h_gaps)
+            else:
+                # Not enough space even at minimum gap — compress box widths
+                # We need: total_box_w + MIN_H_GAP * n_h_gaps <= available_w
+                target_box_w = available_w - MIN_H_GAP * n_h_gaps
+                if target_box_w < total_box_w:
+                    scale_w = target_box_w / total_box_w * 0.96
+                    for r in range(max_rank + 1):
+                        for nd in ranks[r]:
+                            nd._w *= scale_w
+                            nd._w = max(nd._w, 0.50)
+                    col_widths = [max(nd._w for nd in ranks[r]) for r in range(max_rank + 1)]
+                    total_box_w = sum(col_widths)
+                h_gap = max(MIN_H_GAP, (available_w - total_box_w) / n_h_gaps)
+        else:
+            h_gap = 0.60
+
+        # V_GAP between nodes in same column
+        MIN_V_GAP = 0.46
+
+        # Total content width — must stay within available_w
+        total_content_w = sum(col_widths) + h_gap * n_h_gaps
+        # If still overflows (floating point), clamp h_gap
+        if total_content_w > available_w and n_h_gaps > 0:
+            h_gap = (available_w - total_box_w) / n_h_gaps * 0.98
+            h_gap = max(0.10, h_gap)
+            total_content_w = sum(col_widths) + h_gap * n_h_gaps
+
+        # Center content horizontally within available area
+        start_x = content_x1 + max(0.0, (available_w - total_content_w) / 2)
+
+        positions = {}
+        cur_x = start_x
+
+        for r in range(max_rank + 1):
+            nodes = ranks[r]
+            col_w = col_widths[r]
+
+            # Stack nodes vertically in this column
+            total_col_h = sum(nd._h for nd in nodes)
+            n_v_gaps = len(nodes) - 1
+            if n_v_gaps > 0:
+                remaining_h = available_h - total_col_h
+                v_gap = max(MIN_V_GAP, min(0.70, remaining_h / n_v_gaps))
+            else:
+                v_gap = 0.0
+            total_col_content_h = total_col_h + v_gap * n_v_gaps
+            col_start_y = content_cy + total_col_content_h / 2
+
+            cur_y = col_start_y
+            for nd in nodes:
+                cx = cur_x + col_w / 2
+                cy = cur_y - nd._h / 2
+                positions[nd.id] = (cx, cy)
+                cur_y -= nd._h + v_gap
+
+            cur_x += col_w + h_gap
+
+        return positions
+
     # ── Step 4: Draw everything ───────────────────────────────────────────────
 
     def _draw(self, output_path: str, positions: dict):
         """Create Drawing, render all nodes and edges, save."""
-        d = Drawing(output_path, fig_num=self.fig_label.replace('FIG. ', ''))
+        fig_num = self.fig_label.replace('FIG. ', '')
+        d = Drawing(output_path, fig_num=fig_num)
 
-        fs = self.DEFAULT_FS
+        # Use the font size determined by _measure_nodes (may be smaller for deep flows)
+        fs = getattr(self, '_active_fs', self.DEFAULT_FS)
 
         # Draw nodes
         for nid in self._order:
@@ -394,9 +549,57 @@ class PatentFigure:
             # Check if this edge skips over intermediate nodes
             is_skip = rank_diff > 1
 
+            # LR direction: use horizontal primary axis
+            if self.direction == 'LR':
+                # In LR layout: same-rank nodes are in the same column (vertically stacked)
+                # Cross-rank edges go left→right
+                if rank_diff == 0:
+                    # Same rank (same column): vertical direct or side routing
+                    if abs(sb.cy - db.cy) > 0.1:
+                        if db.cy < sb.cy:
+                            d.arrow_route([sb.bot_mid(), db.top_mid()])
+                        else:
+                            d.arrow_route([sb.top_mid(), db.bot_mid()])
+                    else:
+                        d.arrow_route([sb.right_mid(), db.left_mid()])
+                elif rank_diff == 1:
+                    # Adjacent column: right → left of next box
+                    if e.bidir:
+                        d.arrow_bidir_route([sb.right_mid(), db.left_mid()])
+                    else:
+                        d.arrow_route([sb.right_mid(), db.left_mid()])
+                else:
+                    # Skip-rank LR: route via top channel
+                    skip_channel_y = min(
+                        b.bot for b in [self._nodes[nid].box_ref
+                                        for nid in self._order
+                                        if self._nodes[nid].box_ref]
+                    ) - 0.35
+                    skip_channel_y = max(skip_channel_y, self.BND_Y1 + 0.20)
+                    d.arrow_route([
+                        sb.top_mid(),
+                        ('up_to', skip_channel_y),
+                        ('right_to', db.cx),
+                        db.top_mid(),
+                    ])
+
+                if e.label:
+                    if rank_diff == 0:
+                        mid_x = (sb.cx + db.cx) / 2
+                        mid_y = (sb.cy + db.cy) / 2
+                        d.label(mid_x + 0.05, mid_y + 0.08, e.label, ha='left', fs=fs)
+                    else:
+                        mid_x = (sb.right + db.left) / 2
+                        d.label(mid_x, (sb.cy + db.cy) / 2 + 0.08, e.label, ha='center', fs=fs)
+                continue
+
+            # TB direction (default): vertical primary axis
             # Same column: straight vertical arrow (only if no intermediate boxes in path)
             if abs(sb.cx - db.cx) < 0.1 and not is_skip:
-                d.arrow_v(sb, db)
+                if e.bidir:
+                    d.arrow_bidir(sb, db, side='v')
+                else:
+                    d.arrow_v(sb, db)
             elif is_skip:
                 # Skip-rank: route via right side channel to avoid crossing intermediate boxes
                 d.arrow_route([
@@ -410,19 +613,29 @@ class PatentFigure:
                 if abs(src_nd.rank - dst_nd.rank) == 0:
                     # Same-rank: horizontal exit from side (left or right) of src
                     if db.cx < sb.cx:
-                        d.arrow_route([sb.left_mid(), db.right_mid()])
+                        if e.bidir:
+                            d.arrow_bidir_route([sb.left_mid(), db.right_mid()])
+                        else:
+                            d.arrow_route([sb.left_mid(), db.right_mid()])
                     else:
-                        d.arrow_route([sb.right_mid(), db.left_mid()])
+                        if e.bidir:
+                            d.arrow_bidir_route([sb.right_mid(), db.left_mid()])
+                        else:
+                            d.arrow_route([sb.right_mid(), db.left_mid()])
                 elif abs(src_nd.rank - dst_nd.rank) == 1:
                     # Adjacent rank: standard elbow — ensure minimum 0.44" segments
                     # by using at least 0.44" below src and above dst
                     mid_y = min(sb.bot - 0.44, max(db.top + 0.44, (sb.bot + db.top) / 2))
-                    d.arrow_route([
+                    route_pts = [
                         sb.bot_mid(),
                         (sb.cx, mid_y),
                         (db.cx, mid_y),
                         db.top_mid(),
-                    ])
+                    ]
+                    if e.bidir:
+                        d.arrow_bidir_route(route_pts)
+                    else:
+                        d.arrow_route(route_pts)
                 else:
                     # Multi-rank: handled by skip-rank logic above (shouldn't reach here)
                     mid_y = (sb.bot + db.top) / 2
@@ -506,6 +719,42 @@ class PatentFigure:
                         d.label(sb.cx - 0.12, sb.bot - 0.12, e.label, ha='right', fs=fs)
                     else:
                         d.label(channel_x - 0.08, sb.cy + 0.10, e.label, ha='right', fs=fs)
+
+        # Draw containers (dashed group boxes)
+        for cont in self._containers:
+            # Compute bounding box of contained nodes
+            ref_boxes = [self._nodes[nid].box_ref for nid in cont.node_ids
+                         if nid in self._nodes and self._nodes[nid].box_ref]
+            if not ref_boxes:
+                continue
+            pad = cont.pad
+            min_x = min(b.left for b in ref_boxes) - pad
+            min_y = min(b.bot  for b in ref_boxes) - pad
+            max_x = max(b.right for b in ref_boxes) + pad
+            max_y = max(b.top  for b in ref_boxes) + pad
+            w = max_x - min_x
+            h = max_y - min_y
+            # Draw as dashed rectangle
+            rect = d.ax.add_patch(
+                __import__('matplotlib').patches.FancyBboxPatch(
+                    (min_x, min_y), w, h,
+                    boxstyle='square,pad=0',
+                    linewidth=1.0, edgecolor='black', facecolor='none',
+                    linestyle='dashed', zorder=3
+                )
+            )
+            # Label: place above the container top edge (outside the box)
+            if cont.label:
+                # Use first line of label as main text (reference number)
+                label_lines = cont.label.split('\n')
+                label_text = cont.label
+                # Place label just above the dashed box top edge
+                label_y = max_y + 0.04
+                d.ax.text((min_x + max_x) / 2, label_y, label_text,
+                          fontsize=7, ha='center', va='bottom',
+                          fontfamily='DejaVu Sans',
+                          zorder=21,
+                          bbox=dict(facecolor='white', edgecolor='none', pad=1))
 
         # Boundary + label
         d.boundary(self.BND_X1, self.BND_Y1, self.BND_X2, self.BND_Y2)

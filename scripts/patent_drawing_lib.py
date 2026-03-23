@@ -2107,23 +2107,23 @@ class Drawing:
         # 2-pass 렌더링: 1차에서 실측 → center shift → 2차 최종 렌더링
         bnd_rect = self._render_all()
 
-        # 1차 렌더링 후 전체 콘텐츠 실측 bounding box
+        # 1차 렌더링 후 전체 콘텐츠+boundary 실측 → 페이지 중앙으로
         if bnd_rect and (self._box_refs or self._label_extents):
             bx1, by1, bx2, by2 = bnd_rect
-            bnd_cx = (bx1 + bx2) / 2
+            page_cx = PAGE_W / 2
 
-            # 모든 요소의 실측 좌우 범위
-            all_lefts = [b.left for b in self._box_refs]
-            all_rights = [b.right for b in self._box_refs]
+            # 모든 요소(box + callout + label + boundary)의 실측 좌우 범위
+            all_lefts = [b.left for b in self._box_refs] + [bx1]
+            all_rights = [b.right for b in self._box_refs] + [bx2]
             for le in self._label_extents:
                 all_lefts.append(le['x0'])
                 all_rights.append(le['x1'])
 
             if all_lefts and all_rights:
-                content_left = min(all_lefts)
-                content_right = max(all_rights)
-                content_cx = (content_left + content_right) / 2
-                dx = bnd_cx - content_cx
+                total_left = min(all_lefts)
+                total_right = max(all_rights)
+                total_cx = (total_left + total_right) / 2
+                dx = page_cx - total_cx
 
                 if abs(dx) > 0.05:  # 0.05" 이상 치우침일 때만 재렌더링
                     # shift 적용

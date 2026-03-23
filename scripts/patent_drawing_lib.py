@@ -2050,9 +2050,9 @@ class Drawing:
             self._no_ref_boxes.add(id(o))
             ovals.append(o)
 
-            # 순서 번호를 oval 외부 왼쪽 상단에 표시
-            num_x = cx - node_r - 0.15
-            num_y = cy + node_r + 0.05
+            # 순서 번호를 oval 외부 왼쪽 상단에 표시 (x좌표 통일)
+            num_x = x_start - oval_w / 2 - 0.20  # 모든 노드에서 동일한 x
+            num_y = cy + oval_h / 2 + 0.08
             self._cmds.append(('label', num_x, num_y, num, 'right', fs))
 
         # 화살표 연결 (sequential)

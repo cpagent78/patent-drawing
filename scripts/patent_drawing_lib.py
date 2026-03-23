@@ -2366,8 +2366,9 @@ class Drawing:
             boxstyle=f"round,pad=0,rounding_size={r}",
             facecolor=BOX_FILL, edgecolor=BOX_EDGE,
             linewidth=LW_BOX, zorder=Z_BOX_EDGE))
-        fs_fit = self._fit_font(text, b.w - 0.24, b.h - 0.10, fs or FS_BODY)
-        ax.text(b.cx, b.cy, text,
+        tw, th, dx_off, dy_off = self._get_text_rect('rounded_rect', b.w, b.h)
+        fs_fit = self._fit_font(text, tw, th, fs or FS_BODY)
+        ax.text(b.cx + dx_off, b.cy + dy_off, text,
                 ha='center', va='center',
                 fontsize=fs_fit, fontweight=FW,
                 multialignment='center', wrap=False,
@@ -2447,10 +2448,11 @@ class Drawing:
                         color=BOX_EDGE, lw=LW_BOX,
                         solid_capstyle='butt', zorder=Z_BOX_EDGE)
 
-        # Step 3: 텍스트
+        # Step 3: 텍스트 — _get_text_rect() 통합
         if text:
-            fs_use = self._fit_font(text, w * 0.65, h * 0.50, fs)
-            ax.text(cx, cy, text,
+            tw, th, dx_off, dy_off = self._get_text_rect('cloud', w, h)
+            fs_use = self._fit_font(text, tw, th, fs)
+            ax.text(cx + dx_off, cy + dy_off, text,
                     ha='center', va='center',
                     fontsize=fs_use, fontweight=FW,
                     multialignment='center', zorder=Z_BOX_TEXT)
@@ -2767,10 +2769,11 @@ class Drawing:
         ax.add_patch(Ellipse((cx, cy), w, h,
                              facecolor='none', edgecolor=BOX_EDGE,
                              linewidth=LW_BOX, zorder=Z_BOX_EDGE))
-        # 텍스트 (내접 사각형 기준 90% 폭)
+        # 텍스트 — _get_text_rect() 통합
         if text:
-            fs_use = self._fit_font(text, w * 0.80, h * 0.70, fs)
-            ax.text(cx, cy, text,
+            tw, th, dx_off, dy_off = self._get_text_rect('oval', w, h)
+            fs_use = self._fit_font(text, tw, th, fs)
+            ax.text(cx + dx_off, cy + dy_off, text,
                     ha='center', va='center',
                     fontsize=fs_use, fontweight=FW,
                     multialignment='center', zorder=Z_BOX_TEXT)

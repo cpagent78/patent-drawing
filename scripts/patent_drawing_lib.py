@@ -2104,6 +2104,80 @@ class Drawing:
     # ── 렌더링 ────────────────────────────────────────────────────────────────
 
     def save(self):
+        # 2-pass 렌더링: 1차에서 실측 → center shift → 2차 최종 렌더링
+        bnd_rect = self._render_all()
+
+        # 1차 렌더링 후 전체 콘텐츠 실측 bounding box
+        if bnd_rect and (self._box_refs or self._label_extents):
+            bx1, by1, bx2, by2 = bnd_rect
+            bnd_cx = (bx1 + bx2) / 2
+
+            # 모든 요소의 실측 좌우 범위
+            all_lefts = [b.left for b in self._box_refs]
+            all_rights = [b.right for b in self._box_refs]
+            for le in self._label_extents:
+                all_lefts.append(le['x0'])
+                all_rights.append(le['x1'])
+
+            if all_lefts and all_rights:
+                content_left = min(all_lefts)
+                content_right = max(all_rights)
+                content_cx = (content_left + content_right) / 2
+                dx = bnd_cx - content_cx
+
+                if abs(dx) > 0.05:  # 0.05" 이상 치우침일 때만 재렌더링
+                    # shift 적용
+                    for b in self._box_refs:
+                        b.x += dx
+                    new_cmds = []
+                    for cmd in self._cmds:
+                        if cmd[0] == 'boundary':
+                            new_cmds.append(cmd)  # boundary는 고정
+                        elif cmd[0] == 'box':
+                            new_cmds.append(cmd)
+                        elif cmd[0] == 'route':
+                            _, pts, lbl, lpos, lopt, *rest = cmd
+                            new_cmds.append(('route', [(x+dx,y) for x,y in pts], lbl, lpos, lopt, *rest))
+                        elif cmd[0] == 'bidir':
+                            _, pts = cmd
+                            new_cmds.append(('bidir', [(x+dx,y) for x,y in pts]))
+                        elif cmd[0] == 'line':
+                            _, x1, y1, x2, y2, ls = cmd
+                            new_cmds.append(('line', x1+dx, y1, x2+dx, y2, ls))
+                        elif cmd[0] == 'label':
+                            _, x, y, text, ha, fs = cmd
+                            new_cmds.append(('label', x+dx, y, text, ha, fs))
+                        elif cmd[0] == 'ref_callout':
+                            new_cmds.append(cmd)  # box가 이미 shift됨
+                        elif cmd[0] == 'ref_callout_bus':
+                            _, bus_x, ref_num, side, fs = cmd
+                            new_cmds.append(('ref_callout_bus', bus_x+dx, ref_num, side, fs))
+                        else:
+                            new_cmds.append(cmd)
+                    self._cmds = new_cmds
+                    self._label_extents = []
+
+                    # 2차 렌더링 (clear + redraw)
+                    self.ax.clear()
+                    self.ax.set_xlim(0, PAGE_W)
+                    self.ax.set_ylim(0, PAGE_H)
+                    self.ax.set_aspect('equal')
+                    self.ax.axis('off')
+                    bnd_rect = self._render_all()
+
+        issues = self._validate(bnd_rect)
+        tag = '✓' if not issues else '⚠'
+        print(f'{tag}  {self.filename}')
+        for iss in issues:
+            print(f'   · {iss}')
+
+        self.fig.savefig(self.filename, dpi=self.dpi,
+                         bbox_inches='tight', pad_inches=0.1,
+                         facecolor='white')
+        plt.close(self.fig)
+
+    def _render_all(self):
+        """모든 요소를 렌더링하고 bnd_rect를 반환."""
         ax = self.ax
         bnd_rect = None
 
@@ -2269,19 +2343,7 @@ class Drawing:
                         ha='center', va='center',
                         fontsize=FS_FIG, fontweight=FW, zorder=Z_FIG_LABEL)
 
-        os.makedirs(os.path.dirname(os.path.abspath(self.filename)), exist_ok=True)
-        self.fig.savefig(self.filename, dpi=self.dpi,
-                         facecolor='white', bbox_inches='tight')
-
-        issues = self._validate(bnd_rect)
-        if issues:
-            print(f"⚠  {self.filename}")
-            for iss in issues:
-                print(f"   · {iss}")
-        else:
-            print(f"✓  {self.filename}")
-
-        plt.close(self.fig)
+        return bnd_rect
 
     # ── 신규 도형 렌더 ────────────────────────────────────────────────────────
 

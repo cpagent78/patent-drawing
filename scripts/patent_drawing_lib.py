@@ -2132,7 +2132,9 @@ class Drawing:
                     new_cmds = []
                     for cmd in self._cmds:
                         if cmd[0] == 'boundary':
-                            new_cmds.append(cmd)  # boundary는 고정
+                            # boundary도 같이 shift (페이지/layer 모두)
+                            _, x1, y1, x2, y2, lbl, is_page = cmd
+                            new_cmds.append(('boundary', x1+dx, y1, x2+dx, y2, lbl, is_page))
                         elif cmd[0] == 'box':
                             new_cmds.append(cmd)
                         elif cmd[0] == 'route':

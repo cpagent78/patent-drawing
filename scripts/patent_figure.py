@@ -102,8 +102,8 @@ class PatentFigure:
     DIAMOND_H = 1.10       # diamond height
     BOX_PAD_X = 0.22       # text padding inside boxes
     BOX_PAD_Y = 0.14
-    DEFAULT_FS = 8         # default font size (patent-scale)
-    MIN_FS = 6             # minimum font size (for deep/dense flows)
+    DEFAULT_FS = 10        # default font size (patent-scale, matches USPTO §1.84(p)(3) min)
+    MIN_FS = 8             # minimum font size (for deep/dense flows)
 
     def __init__(self, fig_label: str = 'FIG. 1', orientation: str = 'portrait',
                  direction: str = 'TB'):
@@ -114,6 +114,38 @@ class PatentFigure:
         self._edges: list[FigEdge] = []
         self._containers: list[FigContainer] = []
         self._order: list[str] = []            # insertion order
+        # Phase 2: Style parameters (None = use library defaults)
+        self._style: dict = {}
+
+    def style(self, **kwargs) -> 'PatentFigure':
+        """
+        Set visual style parameters for the figure.
+
+        Parameters
+        ----------
+        line_width : float
+            Line width multiplier for boxes and arrows (default 1.0).
+            E.g. line_width=1.5 makes lines 50% thicker.
+        arrow_scale : float
+            Arrowhead size multiplier (default 1.0 = mutation_scale 12).
+            E.g. arrow_scale=1.5 makes arrowheads 50% larger.
+        label_fs_scale : float
+            Font size multiplier for edge labels (Yes/No, etc.) (default 1.0).
+            Applied on top of the auto-computed node font size.
+        diamond_text_scale : float
+            Font size multiplier for text inside diamond shapes (default 1.0).
+            Useful when diamond text is long and needs to be smaller.
+        text_align : str
+            Text alignment inside boxes: 'center' (default) or 'left'.
+            NOTE: patent_drawing_lib always uses 'center'; setting 'left' here
+            is noted but has limited effect without lib-level changes.
+
+        Example
+        -------
+        fig.style(line_width=1.3, arrow_scale=1.2, label_fs_scale=1.1)
+        """
+        self._style.update(kwargs)
+        return self
 
     def node(self, id: str, text: str, shape: str = 'process') -> 'PatentFigure':
         """Add a node. shape: process | start | end | diamond | oval | cylinder"""
@@ -375,6 +407,46 @@ class PatentFigure:
             if needed <= available_h or fs == self.MIN_FS:
                 break
 
+        # ── LR-mode: size boxes to distribute evenly across page width ─────────
+        if self.direction == 'LR':
+            EXTRA_MARGIN = 0.12
+            lr_content_x1 = self.BND_X1 + self.INNER_PAD + EXTRA_MARGIN
+            lr_content_x2 = self.BND_X2 - self.INNER_PAD - EXTRA_MARGIN
+            lr_available_w = lr_content_x2 - lr_content_x1
+            lr_available_h = (self.BND_Y2 - self.INNER_PAD) - (self.BND_Y1 + self.INNER_PAD)
+            n_cols = max_rank + 1
+            n_gaps = max_rank
+            # Distribute available_w: target 40% gaps, 60% boxes
+            # But also ensure min gap of 0.50"
+            MIN_H_GAP = 0.50
+            if n_gaps > 0:
+                target_gap = max(MIN_H_GAP, lr_available_w * 0.38 / n_gaps)
+                target_box_w = (lr_available_w - target_gap * n_gaps) / n_cols
+                target_box_w = max(1.00, target_box_w)
+            else:
+                target_box_w = lr_available_w * 0.50
+            # Recalculate gap with actual box width
+            if n_gaps > 0:
+                actual_gap = (lr_available_w - target_box_w * n_cols) / n_gaps
+                actual_gap = max(MIN_H_GAP, actual_gap)
+            else:
+                actual_gap = 0.0
+            # Set width for all nodes
+            for nd in self._nodes.values():
+                if nd.shape != 'diamond':
+                    nd._w = target_box_w
+            # Set height: for single-row LR, use 55% of page height,
+            # capped at 2:1 height-to-width ratio for natural proportions
+            max_nodes_per_col = max(len(ranks[r]) for r in range(max_rank + 1))
+            if max_nodes_per_col == 1:
+                target_box_h = lr_available_h * 0.55
+                max_aspect = 2.0   # max height = 2× width for landscape blocks
+                target_box_h = min(target_box_h, target_box_w * max_aspect)
+                for nd in self._nodes.values():
+                    if nd.shape != 'diamond':
+                        nd._h = max(nd._h, target_box_h)
+            return  # skip TB-specific width check below
+
         # ── Scale widths if any row is too wide ──────────────────────────────
         content_x1 = self.BND_X1 + self.INNER_PAD + self.LOOPBACK_MARGIN
         content_x2 = self.BND_X2 - self.INNER_PAD
@@ -438,10 +510,10 @@ class PatentFigure:
                 # The _measure_nodes() already tried to pre-shrink boxes;
                 # if it's still not enough, it's geometrically impossible on one page.
                 pass
-            # Cap maximum gap (no wasted space)
-            v_gap = min(0.90, max(0.20, best_gap))
+            # Cap maximum gap — allow up to 1.50" for sparse flows to fill the page
+            v_gap = min(1.50, max(0.20, best_gap))
         else:
-            v_gap = 0.55
+            v_gap = 0.80
 
         total_h = total_node_h + v_gap * n_gaps
 
@@ -510,32 +582,17 @@ class PatentFigure:
         col_widths = [max(nd._w for nd in ranks[r]) for r in range(max_rank + 1)]
 
         # H_GAP between columns
-        # Arrow segments need minimum 0.44" each side → min gap = 0.88"
-        # For direct right→left connections: just need 0.30" each side
-        MIN_H_GAP = 0.30
+        # Box widths are pre-computed in _measure_nodes for LR mode.
+        # Recalculate gap based on actual col_widths to match.
+        MIN_H_GAP = 0.50
         n_h_gaps = max_rank
         total_box_w = sum(col_widths)
         if n_h_gaps > 0:
-            # Try to fit everything: boxes + minimum gaps within available_w
-            # Step 1: determine h_gap based on available space after boxes
             remaining_w = available_w - total_box_w
-            if remaining_w >= MIN_H_GAP * n_h_gaps:
-                h_gap = min(0.90, remaining_w / n_h_gaps)
-            else:
-                # Not enough space even at minimum gap — compress box widths
-                # We need: total_box_w + MIN_H_GAP * n_h_gaps <= available_w
-                target_box_w = available_w - MIN_H_GAP * n_h_gaps
-                if target_box_w < total_box_w:
-                    scale_w = target_box_w / total_box_w * 0.96
-                    for r in range(max_rank + 1):
-                        for nd in ranks[r]:
-                            nd._w *= scale_w
-                            nd._w = max(nd._w, 0.50)
-                    col_widths = [max(nd._w for nd in ranks[r]) for r in range(max_rank + 1)]
-                    total_box_w = sum(col_widths)
-                h_gap = max(MIN_H_GAP, (available_w - total_box_w) / n_h_gaps)
+            h_gap = max(MIN_H_GAP, remaining_w / n_h_gaps)
+            h_gap = min(1.50, h_gap)
         else:
-            h_gap = 0.60
+            h_gap = 0.80
 
         # V_GAP between nodes in same column
         MIN_V_GAP = 0.46
@@ -563,7 +620,7 @@ class PatentFigure:
             n_v_gaps = len(nodes) - 1
             if n_v_gaps > 0:
                 remaining_h = available_h - total_col_h
-                v_gap = max(MIN_V_GAP, min(0.70, remaining_h / n_v_gaps))
+                v_gap = max(MIN_V_GAP, min(1.20, remaining_h / n_v_gaps))
             else:
                 v_gap = 0.0
             total_col_content_h = total_col_h + v_gap * n_v_gaps
@@ -582,13 +639,61 @@ class PatentFigure:
 
     # ── Step 4: Draw everything ───────────────────────────────────────────────
 
+    def _apply_style(self):
+        """
+        Phase 2: Apply style overrides to patent_drawing_lib module constants.
+        Returns a dict of original values for restoration.
+        """
+        import patent_drawing_lib as _lib
+        originals = {}
+        if not self._style:
+            return originals
+
+        lw_mult = self._style.get('line_width', 1.0)
+        if lw_mult != 1.0:
+            originals['LW_BOX'] = _lib.LW_BOX
+            originals['LW_ARR'] = _lib.LW_ARR
+            _lib.LW_BOX = _lib.LW_BOX * lw_mult
+            _lib.LW_ARR = _lib.LW_ARR * lw_mult
+
+        return originals
+
+    def _restore_style(self, originals: dict):
+        """Restore patent_drawing_lib constants after rendering."""
+        import patent_drawing_lib as _lib
+        for k, v in originals.items():
+            setattr(_lib, k, v)
+
     def _draw(self, output_path: str, positions: dict):
         """Create Drawing, render all nodes and edges, save."""
         fig_num = self.fig_label.replace('FIG. ', '')
+
+        # Phase 2: Apply style overrides
+        _style_originals = self._apply_style()
+
         d = Drawing(output_path, fig_num=fig_num)
 
         # Use the font size determined by _measure_nodes (may be smaller for deep flows)
         fs = getattr(self, '_active_fs', self.DEFAULT_FS)
+
+        # Phase 2: Apply font size scales from style
+        arrow_scale = self._style.get('arrow_scale', 1.0)
+        label_fs_scale = self._style.get('label_fs_scale', 1.0)
+        diamond_text_scale = self._style.get('diamond_text_scale', 1.0)
+
+        _orig_fs = fs
+        _label_fs = max(6, int(fs * label_fs_scale))
+        _diamond_fs = max(6, int(fs * diamond_text_scale))
+
+        # Patch arrow mutation_scale if arrow_scale != 1.0
+        # We do this by monkey-patching the render method temporarily
+        if arrow_scale != 1.0:
+            import patent_drawing_lib as _lib
+            _orig_ms = 12  # default mutation_scale in library
+            _new_ms = int(_orig_ms * arrow_scale)
+            # Store for use in _render_route patching (via closure)
+            d._patent_arrow_scale = arrow_scale
+            d._patent_mutation_scale = _new_ms
 
         # Draw nodes
         for nid in self._order:
@@ -600,13 +705,12 @@ class PatentFigure:
                 y = cy - nd._h / 2
                 nd.box_ref = d.rounded_rect(x, y, nd._w, nd._h, nd.text, fs=fs, radius=0.20)
             elif nd.shape == 'diamond':
-                nd.box_ref = d.decision_diamond(cx, cy, nd._w, nd._h, nd.text, fs=fs)
+                nd.box_ref = d.decision_diamond(cx, cy, nd._w, nd._h, nd.text, fs=_diamond_fs)
             elif nd.shape == 'oval':
                 nd.box_ref = d.oval(cx, cy, nd._w, nd._h, nd.text, fs=fs)
             elif nd.shape == 'cylinder':
-                x = cx - nd._w / 2
-                y = cy - nd._h / 2
-                nd.box_ref = d.database_cylinder(x, y, nd._w, nd._h, nd.text, fs=fs)
+                # database_cylinder takes cx, cy (center), not x, y (bottom-left)
+                nd.box_ref = d.database_cylinder(cx, cy, nd._w, nd._h, nd.text, fs=fs)
             else:  # process (default box)
                 x = cx - nd._w / 2
                 y = cy - nd._h / 2
@@ -692,10 +796,10 @@ class PatentFigure:
                     if rank_diff == 0:
                         mid_x = (sb.cx + db.cx) / 2
                         mid_y = (sb.cy + db.cy) / 2
-                        d.label(mid_x + 0.05, mid_y + 0.08, e.label, ha='left', fs=fs)
+                        d.label(mid_x + 0.05, mid_y + 0.08, e.label, ha='left', fs=_label_fs)
                     else:
                         mid_x = (sb.right + db.left) / 2
-                        d.label(mid_x, (sb.cy + db.cy) / 2 + 0.08, e.label, ha='center', fs=fs)
+                        d.label(mid_x, (sb.cy + db.cy) / 2 + 0.08, e.label, ha='center', fs=_label_fs)
                 continue
 
             # TB direction (default): vertical primary axis
@@ -756,27 +860,27 @@ class PatentFigure:
                 if src_nd.shape == 'diamond':
                     if abs(sb.cx - db.cx) < 0.1 and not is_skip:
                         # Straight down label
-                        d.label(sb.cx + 0.12, sb.bot - 0.08, e.label, ha='left', fs=fs)
+                        d.label(sb.cx + 0.12, sb.bot - 0.08, e.label, ha='left', fs=_label_fs)
                     elif is_skip:
-                        d.label(skip_channel_x + 0.08, (sb.cy + db.cy) / 2, e.label, ha='left', fs=fs)
+                        d.label(skip_channel_x + 0.08, (sb.cy + db.cy) / 2, e.label, ha='left', fs=_label_fs)
                     elif abs(src_nd.rank - dst_nd.rank) == 0:
                         # Same-rank side exit: label on diamond side
                         if db.cx < sb.cx:
-                            d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=fs)
+                            d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=_label_fs)
                         else:
-                            d.label(sb.right + 0.08, sb.cy + 0.10, e.label, ha='left', fs=fs)
+                            d.label(sb.right + 0.08, sb.cy + 0.10, e.label, ha='left', fs=_label_fs)
                     else:
                         # Cross-rank elbow: label on diamond side at departure
                         if db.cx < sb.cx:
-                            d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=fs)
+                            d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=_label_fs)
                         else:
-                            d.label(sb.right + 0.08, sb.cy + 0.10, e.label, ha='left', fs=fs)
+                            d.label(sb.right + 0.08, sb.cy + 0.10, e.label, ha='left', fs=_label_fs)
                 else:
                     if is_skip:
-                        d.label(skip_channel_x + 0.08, (sb.cy + db.cy) / 2, e.label, ha='left', fs=fs)
+                        d.label(skip_channel_x + 0.08, (sb.cy + db.cy) / 2, e.label, ha='left', fs=_label_fs)
                     else:
                         mid_y = (sb.bot + db.top) / 2
-                        d.label(sb.cx + 0.12, mid_y, e.label, ha='left', fs=fs)
+                        d.label(sb.cx + 0.12, mid_y, e.label, ha='left', fs=_label_fs)
 
         # Draw back-edges (loop-back through left channel)
         back_edges = [e for e in self._edges if e.is_back]
@@ -825,9 +929,9 @@ class PatentFigure:
                 # Label: place it near the source departure, offset from channel
                 if e.label:
                     if src_nd.shape == 'diamond':
-                        d.label(sb.cx - 0.12, sb.bot - 0.12, e.label, ha='right', fs=fs)
+                        d.label(sb.cx - 0.12, sb.bot - 0.12, e.label, ha='right', fs=_label_fs)
                     else:
-                        d.label(channel_x - 0.08, sb.cy + 0.10, e.label, ha='right', fs=fs)
+                        d.label(channel_x - 0.08, sb.cy + 0.10, e.label, ha='right', fs=_label_fs)
 
         # Draw containers (dashed group boxes)
         for cont in self._containers:
@@ -869,4 +973,8 @@ class PatentFigure:
         d.boundary(self.BND_X1, self.BND_Y1, self.BND_X2, self.BND_Y2)
         d.fig_label()
         d.save()
+
+        # Phase 2: Restore original library constants
+        self._restore_style(_style_originals)
+
         return d

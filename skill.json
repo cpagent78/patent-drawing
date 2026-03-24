@@ -1,0 +1,18 @@
+{
+  "name": "patent-drawing",
+  "version": "3.0.0",
+  "description": "USPTO-compliant patent drawings — 9 diagram types, zero coordinates",
+  "keywords": ["patent", "drawing", "USPTO", "diagram", "flowchart", "matplotlib", "sequence", "state"],
+  "author": "cpagent78",
+  "license": "MIT",
+  "engines": {
+    "python": ">=3.9"
+  },
+  "dependencies": {
+    "matplotlib": ">=3.5.0",
+    "numpy": ">=1.21.0"
+  },
+  "main": "scripts/patent_figure.py",
+  "cli": "scripts/patent_draw.py",
+  "skill": "SKILL.md"
+}

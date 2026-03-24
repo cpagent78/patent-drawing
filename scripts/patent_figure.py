@@ -2315,3 +2315,136 @@ class PatentSequence:
         d.fig_label()
         d.save()
         return output_path
+
+
+# ── Phase 10: quick_draw() — Momo High-Level API ──────────────────────────────
+
+def quick_draw(spec_text: str, output_path: str,
+               preset: str = 'uspto',
+               lang: str = 'auto',
+               direction: str = 'TB',
+               fig_label: str = 'FIG. 1') -> dict:
+    """
+    명세서 텍스트 → USPTO 규격 PNG 한방에 생성.
+    특허방 모모(patent-drawing 스킬 사용자)용 고수준 API.
+
+    Args:
+        spec_text:   명세서 텍스트 (한글/영어 자동 감지).
+                     S100: ... 형식 한 줄씩.
+        output_path: 출력 PNG 경로 (e.g. 'fig1.png').
+        preset:      'uspto' | 'draft' | 'presentation' (기본: 'uspto').
+        lang:        'auto' | 'ko' | 'en'  — 파싱 힌트 (현재 auto-detect).
+        direction:   'TB' (top-bottom, 기본) | 'LR' (left-right).
+        fig_label:   FIG. 라벨 (기본: 'FIG. 1').
+
+    Returns:
+        dict with keys:
+            'pages'      : list[str]  — 생성된 PNG 파일 경로 목록 (1~2개).
+            'node_count' : int        — 파싱된 노드 수.
+            'warnings'   : list[str]  — 구조 경고 목록.
+            'validation' : dict       — {'passed': bool, 'issues': list[str]}.
+
+    Example::
+
+        from patent_figure import quick_draw
+
+        spec = \"\"\"
+        S100: 사용자 위치 정보 수신
+        S200: 주변 가맹점 검색 (반경 500m)
+        S300: 검색 결과 없을 경우 반경 확장 후 S200으로 복귀
+        S400: 가맹점 목록 정렬 (거리순, 평점순)
+        S500: 사용자에게 추천 목록 제공
+        \"\"\"
+        result = quick_draw(spec, 'output.png')
+        print(result['pages'])     # ['output.png'] or ['output.png', 'output_p2.png']
+        print(result['warnings'])  # [] if clean
+    """
+    import os
+    import time
+
+    t0 = time.time()
+
+    # ── 1. Parse spec → PatentFigure ──────────────────────────────────────────
+    fig = PatentFigure.from_spec(fig_label, spec_text, direction=direction)
+
+    # ── 2. Apply preset ───────────────────────────────────────────────────────
+    if preset in ('uspto', 'draft', 'presentation'):
+        fig.preset(preset)
+
+    # ── 3. Validate structure ─────────────────────────────────────────────────
+    warnings = fig.validate()
+    validation_issues = list(warnings)  # copy
+
+    # ── 4. Ensure output directory exists ────────────────────────────────────
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ── 5. Render (auto-split for large flows) ────────────────────────────────
+    node_count = len(fig._nodes)
+
+    if node_count > 14:
+        # Auto-split: generate page 1 + page 2
+        base, ext = os.path.splitext(output_path)
+        path2 = base + '_p2' + ext
+        try:
+            fig.render_multi(output_path, path2)
+            pages = [output_path, path2]
+        except Exception as e:
+            warnings.append(f"render_multi failed ({e}), falling back to single page")
+            fig.render(output_path, auto_split=False)
+            pages = [output_path]
+    else:
+        fig.render(output_path)
+        pages = [output_path]
+
+    # ── 6. USPTO post-render validation ──────────────────────────────────────
+    # Check generated files pass USPTO rules
+    uspt_issues = _validate_output_files(pages)
+    validation_issues.extend(uspt_issues)
+
+    elapsed = time.time() - t0
+
+    return {
+        'pages':      pages,
+        'node_count': node_count,
+        'warnings':   warnings,
+        'validation': {
+            'passed': len(validation_issues) == 0,
+            'issues': validation_issues,
+        },
+        'elapsed_sec': round(elapsed, 2),
+    }
+
+
+def _validate_output_files(paths: list) -> list:
+    """
+    Post-render USPTO compliance check on generated PNGs.
+    Returns list of issue strings (empty = all good).
+
+    Checks:
+    - File exists and non-empty
+    - PNG can be opened (not corrupted)
+    - (Structural checks are done in validate() before render)
+    """
+    import os
+    issues = []
+    for p in paths:
+        if not os.path.exists(p):
+            issues.append(f"Output file not found: {p}")
+            continue
+        size = os.path.getsize(p)
+        if size < 1000:
+            issues.append(f"Output file suspiciously small ({size} bytes): {p}")
+            continue
+        # Try opening with PIL if available
+        try:
+            from PIL import Image
+            with Image.open(p) as img:
+                w, h = img.size
+                if w < 100 or h < 100:
+                    issues.append(f"Image dimensions too small ({w}x{h}): {p}")
+        except ImportError:
+            pass  # PIL not required
+        except Exception as e:
+            issues.append(f"Cannot open image {p}: {e}")
+    return issues

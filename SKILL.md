@@ -651,3 +651,95 @@ fig.style(corner_radius=0.10)  # 라운드 코너 반경 (인치)
 `corner_radius`가 설정되면 EdgeRouter가 활성화되어:
 - 베지에 곡선 라운드 코너 렌더링
 - A* 격자 기반 장애물 회피 자동 활성화 (교차 감지 시)
+
+---
+
+## 특허방 모모 빠른 시작 (v2.0)
+
+사용자가 명세서 텍스트를 주면 **한 줄**로 도면 생성:
+
+```python
+import sys
+sys.path.insert(0, '<skill_dir>/scripts')
+from patent_figure import quick_draw
+
+# 한글 명세서
+spec = """
+S100: 사용자 위치 정보 수신
+S200: 주변 가맹점 검색 (반경 500m)
+S300: 검색 결과 없을 경우 반경 확장 후 S200으로 복귀
+S400: 가맹점 목록 정렬 (거리순, 평점순)
+S500: 사용자에게 추천 목록 제공
+S600: 사용자 선택 수신
+S700: 선택 가맹점으로 경로 안내 시작
+"""
+result = quick_draw(spec, 'fig1.png')
+
+# result['pages']      → ['fig1.png']  (생성된 파일 목록, 11개+ 시 2페이지)
+# result['node_count'] → 7             (파싱된 노드 수)
+# result['warnings']   → []            (구조 경고 목록)
+# result['validation'] → {'passed': True, 'issues': []}
+# result['elapsed_sec']→ 0.1           (생성 소요 시간)
+```
+
+### quick_draw() API
+
+```python
+def quick_draw(
+    spec_text: str,       # 명세서 텍스트 (S100: ... 형식)
+    output_path: str,     # 출력 PNG 경로
+    preset: str = 'uspto',        # 'uspto' | 'draft' | 'presentation'
+    lang: str = 'auto',           # 'auto' | 'ko' | 'en'  (현재 자동 감지)
+    direction: str = 'TB',        # 'TB' (위→아래) | 'LR' (좌→우)
+    fig_label: str = 'FIG. 1',    # FIG. 라벨
+) -> dict
+```
+
+**반환값:**
+| 키 | 타입 | 설명 |
+|---|---|---|
+| `pages` | `list[str]` | 생성된 PNG 경로 (1~2개) |
+| `node_count` | `int` | 파싱된 노드 수 |
+| `warnings` | `list[str]` | 구조 경고 (루프, 중복 등) |
+| `validation` | `dict` | `{'passed': bool, 'issues': list}` |
+| `elapsed_sec` | `float` | 생성 소요 시간 |
+
+### 자동 처리 항목
+- **한글/영어 자동 감지**: from_spec()이 판별
+- **자동 2페이지 분할**: 노드 14개 초과 시 `_p2.png` 생성
+- **USPTO preset 자동 적용**: 흑백, 10pt 이상, FIG. 라벨 규격 준수
+- **루프 자동 감지**: `후 S200으로 복귀` → back-edge 자동 처리
+
+### USPTO 규격 검증 (validate_uspto.py)
+
+```bash
+# 생성된 PNG 파일 검증
+python scripts/validate_uspto.py research10/
+python scripts/validate_uspto.py fig1.png -v
+```
+
+---
+
+## 현재 기능 목록 (v2.0 완성)
+
+| 기능 | 메서드 | 설명 |
+|---|---|---|
+| **고수준 API** | `quick_draw()` | 명세서 텍스트 → PNG 한방 생성 |
+| **선언적 엔진** | `PatentFigure` | 좌표 0개, 자동 레이아웃 |
+| **자동 파싱** | `from_spec()` | 한글/영어 명세서 → 노드/엣지 자동 생성 |
+| **6종 노드** | `node(shape=)` | start/end/process/diamond/oval/cylinder |
+| **엣지** | `edge()` | bidir, label_back, 루프 자동 처리 |
+| **컨테이너** | `container()` | 점선 그룹 박스 |
+| **노드 그룹** | `node_group()` | 병렬 노드 정렬 |
+| **강조** | `highlight()` | 특정 노드 배경색 |
+| **주석** | `add_note()` | 말풍선 주석 |
+| **역공학** | `export_spec()` | 도면 → 명세서 텍스트 |
+| **검증** | `validate()` | 구조 사전 검증 |
+| **다중 페이지** | `render_multi()` | 2페이지 분할 |
+| **자동 분할** | `render(auto_split=True)` | 14개 초과 자동 2페이지 |
+| **스타일 프리셋** | `preset()` | 'uspto'/'draft'/'presentation' |
+| **버스 토폴로지** | `bus()` | 가로 버스 + 다중 연결 |
+| **시퀀스 다이어그램** | `PatentSequence` | 행위자 + 메시지 시퀀스 |
+| **한글 폰트** | 자동 | Apple SD Gothic Neo 자동 감지 |
+| **EdgeRouter** | 자동 | Bezier 라운드, A* 장애물 회피 |
+| **USPTO 검증** | `validate_uspto.py` | PNG 규격 자동 리포트 |

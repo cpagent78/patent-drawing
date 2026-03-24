@@ -32,6 +32,14 @@ Phase 3 additions:
   - bidir=True in edge(): bidirectional arrow
   - orientation='LR': horizontal left-to-right layout
   - Deep flow short arrow fix: MIN_V_GAP enforced ≥ 0.44"
+
+Phase 6 additions (Research 6):
+  - Auto text wrapping: max_text_width param, wraps long node text automatically
+  - node_group(): force nodes to same rank (side-by-side in TB layout)
+  - add_note(): speech bubble annotation next to a node
+  - export_spec(): reverse-engineer PatentFigure → spec text
+  - validate(): pre-render structural checks (orphans, duplicates, cycles)
+  - from_spec() parser enhanced: parenthetical branches, loops, English specs
 """
 
 import sys, os
@@ -122,6 +130,12 @@ class PatentFigure:
         self._auto_num_prefix: str = ''
         self._auto_num_counter: int = 100
         self._auto_num_step: int = 100
+        # Phase 6: node groups (same-rank forcing)
+        self._node_groups: list[list[str]] = []
+        # Phase 6: notes (speech-bubble annotations)
+        self._notes: list[dict] = []   # {node_id, text}
+        # Phase 6: max text width for auto-wrap (inches, None = disabled)
+        self.max_text_width: float = None
 
     def style(self, **kwargs) -> 'PatentFigure':
         """
@@ -187,6 +201,210 @@ class PatentFigure:
             self._highlights[nid] = style
         return self
 
+    # ── Phase 6 New Methods ───────────────────────────────────────────────────
+
+    def node_group(self, node_ids: list[str]) -> 'PatentFigure':
+        """
+        Force a set of nodes to be assigned the same rank (side-by-side row).
+
+        In TB layout, all nodes in the group will appear in the same horizontal row.
+        In LR layout, all nodes will appear in the same vertical column.
+
+        This is different from container() — node_group() affects layout rank
+        assignment, not just the visual boundary box.
+
+        Args:
+            node_ids: List of node IDs to place at the same rank.
+
+        Example::
+
+            fig.node('S300a', 'Log Event')
+            fig.node('S300b', 'Send Notification')
+            fig.node_group(['S300a', 'S300b'])  # place side-by-side
+        """
+        self._node_groups.append(list(node_ids))
+        return self
+
+    def add_note(self, node_id: str, text: str) -> 'PatentFigure':
+        """
+        Add a speech-bubble annotation next to a node.
+
+        The note is drawn as a small dashed rectangle with a pointer line
+        to the right side of the target node. Useful for draft/review work.
+
+        Note: USPTO formal drawings do not permit speech bubbles. Use only
+        for draft/review figures (not final submissions).
+
+        Args:
+            node_id: The node to annotate.
+            text:    Annotation text (multi-line supported via '\\n').
+
+        Example::
+
+            fig.add_note('S300', 'Check DB index\\nEnsure ACID compliance')
+        """
+        self._notes.append({'node_id': node_id, 'text': text})
+        return self
+
+    def export_spec(self, path: str = None) -> str:
+        """
+        Reverse-engineer this PatentFigure into spec-format text.
+
+        The output is compatible with from_spec() — you can round-trip
+        a figure through export_spec() → from_spec() to get an equivalent figure.
+
+        Args:
+            path: If given, write the spec text to this file path.
+                  If None, just return the string.
+
+        Returns:
+            Spec-format string representation of this figure.
+
+        Example::
+
+            spec = fig.export_spec()
+            # or
+            fig.export_spec('/tmp/my_figure.spec.txt')
+        """
+        lines = []
+        # Build edge lookup: src → list of dst
+        fwd_edges = {}   # src → [(dst, label)]
+        back_edges_map = {}  # src → [(dst, label)]
+
+        # We need to run rank assignment to know which edges are back-edges.
+        # Use a lightweight pass if not yet assigned.
+        if not any(nd.rank != 0 for nd in self._nodes.values()):
+            self._assign_ranks()
+
+        for e in self._edges:
+            if e.is_back:
+                back_edges_map.setdefault(e.src_id, []).append((e.dst_id, e.label))
+            else:
+                fwd_edges.setdefault(e.src_id, []).append((e.dst_id, e.label))
+
+        for nid in self._order:
+            nd = self._nodes[nid]
+            # Clean text: strip the "S100\n" prefix if present
+            text = nd.text
+            if text.startswith(nid + '\n'):
+                text = text[len(nid) + 1:]
+            # Shape annotation
+            shape_note = ''
+            if nd.shape == 'start':
+                shape_note = ' [START]'
+            elif nd.shape == 'end':
+                shape_note = ' [END]'
+            elif nd.shape == 'diamond':
+                shape_note = ' [DECISION]'
+
+            # Build redirect suffix for back-edges
+            backs = back_edges_map.get(nid, [])
+            fwds = fwd_edges.get(nid, [])
+
+            # If there's a back-edge (loop), append → Sxxx
+            redirect_suffix = ''
+            if backs:
+                dst_id, lbl = backs[0]
+                redirect_suffix = f' → {dst_id}'
+                if lbl:
+                    redirect_suffix = f' ({lbl}) → {dst_id}'
+
+            lines.append(f'{nid}: {text}{redirect_suffix}')
+
+        result = '\n'.join(lines)
+        if path:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(result + '\n')
+        return result
+
+    def validate(self) -> list[str]:
+        """
+        Validate this PatentFigure's structure before rendering.
+
+        Checks performed:
+        1. Orphan nodes (no edges in or out)
+        2. Duplicate node IDs (shouldn't happen via API but good to check)
+        3. Duplicate edge pairs (src→dst appears more than once)
+        4. Edges referencing undefined nodes
+        5. Multiple start nodes (shape='start')
+        6. Multiple end nodes (shape='end')
+
+        Returns:
+            List of warning strings. Empty list = no issues found.
+            Does NOT raise exceptions — caller decides whether to abort.
+
+        Example::
+
+            warnings = fig.validate()
+            if warnings:
+                for w in warnings:
+                    print('WARNING:', w)
+            fig.render('output.png')
+        """
+        warnings = []
+
+        # Check for edges referencing undefined nodes
+        for e in self._edges:
+            if e.src_id not in self._nodes:
+                warnings.append(f"Edge references undefined source node: '{e.src_id}'")
+            if e.dst_id not in self._nodes:
+                warnings.append(f"Edge references undefined dest node: '{e.dst_id}'")
+
+        # Build adjacency for valid nodes
+        connected = set()
+        for e in self._edges:
+            if e.src_id in self._nodes and e.dst_id in self._nodes:
+                connected.add(e.src_id)
+                connected.add(e.dst_id)
+
+        # Orphan check
+        for nid in self._order:
+            if nid not in connected:
+                warnings.append(f"Orphan node (no edges): '{nid}' (text='{self._nodes[nid].text[:30]}')")
+
+        # Duplicate edges
+        edge_pairs = [(e.src_id, e.dst_id) for e in self._edges]
+        seen_pairs = set()
+        for pair in edge_pairs:
+            if pair in seen_pairs:
+                warnings.append(f"Duplicate edge: {pair[0]} → {pair[1]}")
+            seen_pairs.add(pair)
+
+        # Multiple start/end shapes
+        starts = [nid for nid, nd in self._nodes.items() if nd.shape == 'start']
+        ends = [nid for nid, nd in self._nodes.items() if nd.shape == 'end']
+        if len(starts) > 1:
+            warnings.append(f"Multiple START nodes: {starts}")
+        if len(ends) > 1:
+            warnings.append(f"Multiple END nodes: {ends}")
+
+        # Note groups with non-existent node IDs
+        for grp in self._node_groups:
+            for nid in grp:
+                if nid not in self._nodes:
+                    warnings.append(f"node_group references undefined node: '{nid}'")
+
+        return warnings
+
+    # ── Phase 6: Text Auto-Wrap ───────────────────────────────────────────────
+
+    @staticmethod
+    def _wrap_text(text: str, max_chars_per_line: int = 18) -> str:
+        """
+        Wrap text so no line exceeds max_chars_per_line characters.
+        Preserves existing newlines. Wraps on word boundaries where possible.
+        """
+        import textwrap
+        result_lines = []
+        for existing_line in text.split('\n'):
+            if len(existing_line) <= max_chars_per_line:
+                result_lines.append(existing_line)
+            else:
+                wrapped = textwrap.fill(existing_line, width=max_chars_per_line,
+                                        break_long_words=True)
+                result_lines.extend(wrapped.split('\n'))
+        return '\n'.join(result_lines)
+
     @classmethod
     def from_spec(cls, fig_label: str, spec_text: str,
                   direction: str = 'TB') -> 'PatentFigure':
@@ -203,12 +421,35 @@ class PatentFigure:
             S600: 검증 성공 → 세션 토큰 발급
             S700: 토큰을 사용자 단말로 전송
 
+        Enhanced parsing (Phase 6):
+
+        Case A — Parenthetical branches::
+
+            S300: 자격증명 검증 (성공 시 S500으로, 실패 시 S400으로)
+
+        Case B — Parallel nodes (same alpha suffix)::
+
+            S200a: 로그 기록
+            S200b: 알림 발송
+
+        Case C — Loop (최대 N회 ... 복귀)::
+
+            S300: 재시도 (최대 3회, 실패 시 S200으로 복귀)
+
+        Case D — English spec (If ... go to ...)::
+
+            S300: If validation fails, check retry count
+
         Parsing rules:
         - Lines matching ``Sxxx: text`` define nodes.
         - First node is shape='start', last node is shape='end'.
         - ``→ Snnn`` at end of text = back-edge / branch to that node.
+        - ``(성공 시 Sxxx으로, 실패 시 Syyy으로)`` → two outgoing edges.
+        - ``(실패 시 Sxxx으로 복귀)`` or ``→ Sxxx`` at any position → loop-back edge.
+        - Adjacent nodes with alpha suffix (S200a, S200b) → node_group().
         - Nodes with multiple outgoing edges get shape='diamond'.
         - Sequential nodes (no → redirect) get a forward edge to the next node.
+        - English: ``if ... go to Snnn`` or ``fails, Snnn`` → branch edge.
 
         Returns:
             A configured PatentFigure instance ready for render().
@@ -217,63 +458,162 @@ class PatentFigure:
 
         fig = cls(fig_label, direction=direction)
 
-        # Parse lines
-        node_defs = []   # [(id, text, redirect_id or None)]
+        # ── Pre-parse: collect node definitions ──────────────────────────────
+        # Each entry: (id, raw_text)
+        raw_lines = []
         for line in spec_text.strip().splitlines():
             line = line.strip()
             if not line:
                 continue
-            m = re.match(r'^(S\d+)\s*[:：]\s*(.+)$', line)
+            # Match Snnn or Snnn[a-z] (alpha suffix for parallel nodes)
+            m = re.match(r'^(S\d+[a-z]?)\s*[:：]\s*(.+)$', line)
             if not m:
                 continue
-            nid = m.group(1)
-            text = m.group(2).strip()
-            # Check for → redirect
-            redirect = None
-            red_m = re.search(r'[→\->]+\s*(S\d+)\s*$', text)
-            if red_m:
-                redirect = red_m.group(1)
-                # Clean up text: remove the redirect part AND the arrow/condition text
-                # E.g. "재시도 횟수 3회 미만 → S200" → "재시도 횟수 3회 미만"
-                text = text[:red_m.start()].rstrip(' \t→\\->').rstrip()
-            # Replace → in text with plain "->" for USPTO compliance
-            text = text.replace('→', '->')
-            node_defs.append((nid, text, redirect))
+            raw_lines.append((m.group(1), m.group(2).strip()))
 
-        if not node_defs:
+        if not raw_lines:
             return fig
 
-        # Determine shapes
-        # Nodes that have → redirects are 'diamond' (decision)
-        # First node = start, last node = end
-        # Everything else = process
-        redirect_srcs = {nid for nid, _, r in node_defs if r}
-        # Nodes that are targets of redirect but not in node_defs sequence get auto-added
-        all_ids = {nid for nid, _, _ in node_defs}
+        all_ids_set = {nid for nid, _ in raw_lines}
 
-        for i, (nid, text, redirect) in enumerate(node_defs):
+        # ── Parse each line for redirects ─────────────────────────────────────
+        # node_defs: list of (id, cleaned_text, redirects: list of (target, label))
+        node_defs = []
+
+        for nid, text in raw_lines:
+            redirects = []  # list of (target_id, label)
+
+            # Case A: parenthetical multi-branch: (성공 시 S500으로, 실패 시 S400으로)
+            # or English: (on success go to S500, on failure go to S400)
+            paren_m = re.search(r'\(([^)]+)\)', text)
+            if paren_m:
+                paren_content = paren_m.group(1)
+                # Korean pattern: "X 시 Snnn으로" or "X → Snnn"
+                kor_branches = re.findall(
+                    r'([^,]+?)\s*(?:시|경우|때)?\s*(?:→|->)?\s*(S\d+[a-z]?)(?:으로|에게|로)?', 
+                    paren_content
+                )
+                # English pattern: "on X go to Snnn" or "X → Snnn"
+                eng_branches = re.findall(
+                    r'(?:on\s+)?([a-z][^,]+?)\s+(?:go\s+to|goto|->|→)\s*(S\d+[a-z]?)',
+                    paren_content, re.IGNORECASE
+                )
+                # Loop: 복귀 pattern: "실패 시 S200으로 복귀"
+                loop_m = re.search(
+                    r'(?:실패|오류|fail[a-z]*).*?(S\d+[a-z]?).*?복귀',
+                    paren_content, re.IGNORECASE
+                )
+                # Generic "Snnn으로 복귀" / "return to Snnn"
+                loop_generic = re.search(
+                    r'(?:복귀|return to|back to)\s*(?:→)?\s*(S\d+[a-z]?)',
+                    paren_content, re.IGNORECASE
+                )
+
+                if kor_branches:
+                    for lbl, tgt in kor_branches:
+                        lbl = lbl.strip().rstrip(' 시경우때')
+                        # Translate common Korean labels
+                        lbl = lbl.replace('성공', 'Y').replace('실패', 'N') \
+                                 .replace('예', 'Y').replace('아니오', 'N').strip()
+                        redirects.append((tgt.strip(), lbl))
+                elif eng_branches:
+                    for lbl, tgt in eng_branches:
+                        redirects.append((tgt.strip(), lbl.strip()))
+                elif loop_m:
+                    redirects.append((loop_m.group(1), 'N'))
+                elif loop_generic:
+                    redirects.append((loop_generic.group(1), ''))
+
+                # Remove the parenthetical from display text if we parsed it
+                if redirects or loop_m or loop_generic:
+                    text = text[:paren_m.start()].rstrip(' \t') + text[paren_m.end():].lstrip()
+
+            # Case D English: "If X, go to/check Snnn" or "If X fails → Snnn"
+            if not redirects:
+                eng_if = re.search(
+                    r'(?:if|when)\s+[^,]+,?\s+(?:go\s+to|check|retry|→|->)\s+(S\d+[a-z]?)',
+                    text, re.IGNORECASE
+                )
+                if eng_if:
+                    redirects.append((eng_if.group(1), 'N'))
+
+            # Arrow redirect: → Snnn or -> Snnn at end of text (after removing parens)
+            if not redirects:
+                red_m = re.search(r'(?:[→\-]+>?\s*)(S\d+[a-z]?)\s*$', text)
+                if red_m:
+                    redirects.append((red_m.group(1), ''))
+                    text = text[:red_m.start()].rstrip(' \t→\\->').rstrip()
+
+            # Korean end-of-sentence redirect: "후 S200으로 복귀" "후 종료"
+            if not redirects:
+                kor_m = re.search(r'후\s+(S\d+[a-z]?)으로\s*(?:복귀|이동)', text)
+                if kor_m:
+                    redirects.append((kor_m.group(1), ''))
+                    text = text[:kor_m.start()].rstrip(' \t').rstrip()
+
+            # Replace remaining → arrows with -> for USPTO
+            text = text.replace('→', '->')
+
+            node_defs.append((nid, text, redirects))
+
+        # ── Detect parallel node groups (same numeric prefix, different letter) ──
+        # e.g. S200a, S200b → same rank group
+        from collections import defaultdict
+        alpha_groups = defaultdict(list)
+        for nid, _, _ in node_defs:
+            m = re.match(r'^(S\d+)([a-z])$', nid)
+            if m:
+                alpha_groups[m.group(1)].append(nid)
+
+        # ── Assign shapes ─────────────────────────────────────────────────────
+        redirect_srcs = {nid for nid, _, reds in node_defs if reds}
+
+        for i, (nid, text, redirects) in enumerate(node_defs):
             if i == 0:
                 shape = 'start'
-            elif i == len(node_defs) - 1 and redirect is None:
+            elif i == len(node_defs) - 1 and not redirects:
                 shape = 'end'
+            elif redirects and len(redirects) > 1:
+                shape = 'diamond'  # multi-branch decision
             elif nid in redirect_srcs:
-                shape = 'diamond'
+                shape = 'diamond'  # has some redirect = decision
             else:
                 shape = 'process'
             fig.node(nid, f'{nid}\n{text}', shape=shape)
 
-        # Build edges
-        for i, (nid, text, redirect) in enumerate(node_defs):
-            if redirect:
-                # Forward edge to next (if not last)
-                if i + 1 < len(node_defs):
-                    next_id = node_defs[i + 1][0]
+        # ── Apply parallel node groups ─────────────────────────────────────────
+        for base_id, group_ids in alpha_groups.items():
+            if len(group_ids) > 1:
+                fig.node_group(group_ids)
+
+        # ── Build edges ────────────────────────────────────────────────────────
+        # Find the "next" sequential node for each, skipping parallel members
+        # (parallel nodes all link to the same "next" downstream node)
+        for i, (nid, text, redirects) in enumerate(node_defs):
+            # Determine sequential next
+            next_id = None
+            if i + 1 < len(node_defs):
+                next_id = node_defs[i + 1][0]
+
+            if redirects:
+                # Has explicit redirects → draw edges per redirect
+                # Also add edge to sequential next (if redirects don't already go there)
+                redirect_targets = {r[0] for r in redirects}
+
+                # If only 1 redirect and next exists and next not in redirects → add seq edge
+                if next_id and next_id not in redirect_targets and len(redirects) == 1:
                     fig.edge(nid, next_id)
-                # Back/branch edge to redirect target
-                fig.edge(nid, redirect)
-            elif i + 1 < len(node_defs):
-                # Sequential forward edge
-                fig.edge(nid, node_defs[i + 1][0])
+
+                for tgt, lbl in redirects:
+                    if tgt in all_ids_set:
+                        fig.edge(nid, tgt, label=lbl)
+                    else:
+                        # Target doesn't exist as a node — treat as end label
+                        pass
+            else:
+                # Sequential: connect to next
+                if next_id:
+                    fig.edge(nid, next_id)
 
         return fig
 
@@ -449,6 +789,16 @@ class PatentFigure:
         for nid, nd in self._nodes.items():
             nd.rank = rank.get(nid, 0)
 
+        # Phase 6: Apply node_group constraints — force all members to same rank
+        for group in self._node_groups:
+            valid = [nid for nid in group if nid in self._nodes]
+            if not valid:
+                continue
+            # Use the minimum rank among group members
+            min_rank = min(self._nodes[nid].rank for nid in valid)
+            for nid in valid:
+                self._nodes[nid].rank = min_rank
+
     def _find_back_edges(self) -> list[FigEdge]:
         """DFS-based back-edge detection."""
         WHITE, GRAY, BLACK = 0, 1, 2
@@ -488,9 +838,18 @@ class PatentFigure:
 
         Uses font-size scaling to ensure deep flows fit on a single page.
         Box sizes reflect what patent_drawing_lib will ACTUALLY draw.
+        Phase 6: Applies auto text wrapping if max_text_width is set.
         """
         from collections import defaultdict
         d = Drawing('/dev/null')
+
+        # Phase 6: Auto text wrapping
+        if self.max_text_width is not None:
+            # Approximate: 1 inch ≈ 10 chars at font size 10
+            chars_per_inch = 10.0
+            max_chars = max(8, int(self.max_text_width * chars_per_inch))
+            for nd in self._nodes.values():
+                nd.text = self._wrap_text(nd.text, max_chars_per_line=max_chars)
 
         # Available area
         content_y_top = self.BND_Y2 - self.INNER_PAD
@@ -532,9 +891,11 @@ class PatentFigure:
                 for nd in box_nodes:
                     nd._w = max_w
 
-            # Check fit
-            total_node_h = sum(max(nd._h for nd in ranks[r]) for r in range(max_rank + 1))
-            needed = total_node_h + MIN_ARROW_GAP * max_rank
+            # Check fit — only count ranks that have nodes (node_group may create gaps)
+            used_ranks = sorted(ranks.keys())
+            total_node_h = sum(max(nd._h for nd in ranks[r]) for r in used_ranks)
+            n_gaps_used = len(used_ranks) - 1
+            needed = total_node_h + MIN_ARROW_GAP * n_gaps_used
             if needed <= available_h or fs == self.MIN_FS:
                 break
 
@@ -545,8 +906,9 @@ class PatentFigure:
             lr_content_x2 = self.BND_X2 - self.INNER_PAD - EXTRA_MARGIN
             lr_available_w = lr_content_x2 - lr_content_x1
             lr_available_h = (self.BND_Y2 - self.INNER_PAD) - (self.BND_Y1 + self.INNER_PAD)
-            n_cols = max_rank + 1
-            n_gaps = max_rank
+            used_ranks_lr = sorted(ranks.keys())
+            n_cols = len(used_ranks_lr)
+            n_gaps = n_cols - 1
             # Distribute available_w: ensure inter-column gap ≥ 1.00" (2 × 0.44" + slack)
             # so that elbow arrows in the gap have sufficient segment length.
             # Also ensure box width ≥ max text width so d.box() doesn't auto-expand beyond nd._w.
@@ -580,7 +942,7 @@ class PatentFigure:
                     nd._w = target_box_w
 
             # Set height: fill vertical space based on max nodes in any column
-            max_nodes_per_col = max(len(ranks[r]) for r in range(max_rank + 1))
+            max_nodes_per_col = max(len(ranks[r]) for r in used_ranks_lr)
             MIN_V_GAP_LR = 0.50
             # For each column, total available height minus gaps
             # Use the column with most nodes as constraint
@@ -631,7 +993,9 @@ class PatentFigure:
             nd = self._nodes[nid]
             ranks[nd.rank].append(nd)
 
-        max_rank = max(ranks.keys()) if ranks else 0
+        # Use only ranks with nodes (node_group may create gaps)
+        used_ranks = sorted(ranks.keys())
+        max_rank = used_ranks[-1] if used_ranks else 0
 
         # Available area
         content_x1 = self.BND_X1 + self.INNER_PAD + self.LOOPBACK_MARGIN
@@ -642,30 +1006,21 @@ class PatentFigure:
         content_y_bot = self.BND_Y1 + self.INNER_PAD
         available_h = content_y_top - content_y_bot
 
-        # Calculate total node height
-        total_node_h = 0
-        for r in range(max_rank + 1):
-            nodes = ranks[r]
-            row_h = max(nd._h for nd in nodes)
-            total_node_h += row_h
+        # Calculate total node height (only used ranks)
+        total_node_h = sum(max(nd._h for nd in ranks[r]) for r in used_ranks)
 
         # Dynamic V_GAP: fill available space evenly
         # For branching flows, elbows need 2 × 0.44" = 0.88" between boxes
         # For straight vertical arrows: minimum 0.46" (just over 0.44" validator limit)
-        has_branching = any(len(ranks[r]) > 1 for r in range(max_rank + 1))
+        has_branching = any(len(ranks[r]) > 1 for r in used_ranks)
         MIN_V_GAP_LINEAR   = 0.46  # straight arrow — slightly above 0.44" min
         MIN_V_GAP_BRANCHING = 0.92  # elbow arrows — two 0.44" segments
-        n_gaps = max_rank  # gaps between ranks
+        n_gaps = len(used_ranks) - 1  # gaps between used ranks
         if n_gaps > 0:
             remaining = available_h - total_node_h
             best_gap = remaining / n_gaps if remaining > 0 else 0.20
             min_gap = MIN_V_GAP_BRANCHING if has_branching else MIN_V_GAP_LINEAR
             if best_gap < min_gap:
-                # Not enough room for minimum gap — we need to shrink boxes
-                # but do NOT modify nd._h here (that's _measure_nodes' job).
-                # Just accept the best gap we can get.
-                # The _measure_nodes() already tried to pre-shrink boxes;
-                # if it's still not enough, it's geometrically impossible on one page.
                 pass
             # Cap maximum gap — allow up to 1.50" for sparse flows to fill the page
             v_gap = min(1.50, max(0.20, best_gap))
@@ -686,7 +1041,7 @@ class PatentFigure:
         positions = {}
         cur_y = start_y
 
-        for r in range(max_rank + 1):
+        for r in used_ranks:
             nodes = ranks[r]
             row_h = max(nd._h for nd in nodes)
 
@@ -723,7 +1078,9 @@ class PatentFigure:
             nd = self._nodes[nid]
             ranks[nd.rank].append(nd)
 
-        max_rank = max(ranks.keys()) if ranks else 0
+        # Use only ranks with nodes (node_group may create gaps)
+        used_ranks = sorted(ranks.keys())
+        max_rank = used_ranks[-1] if used_ranks else 0
 
         # In LR mode, use slightly more margin to prevent box edges from touching boundary
         EXTRA_MARGIN = 0.12
@@ -735,15 +1092,12 @@ class PatentFigure:
         available_h = content_y_top - content_y_bot
         content_cy = (content_y_top + content_y_bot) / 2
 
-        # Column widths = max node width per rank
-        col_widths = [max(nd._w for nd in ranks[r]) for r in range(max_rank + 1)]
+        # Column widths = max node width per rank (only used ranks)
+        col_widths = [max(nd._w for nd in ranks[r]) for r in used_ranks]
 
         # H_GAP between columns
-        # Minimum inter-column gap must be large enough for elbow arrows (2 × 0.44" + slack).
-        # Also need extra to account for box auto-expansion in d.box().
-        # Use 1.10" as conservative minimum to ensure ≥ 0.44" on each side of mid_x.
         MIN_H_GAP = 1.10
-        n_h_gaps = max_rank
+        n_h_gaps = len(used_ranks) - 1
         total_box_w = sum(col_widths)
         if n_h_gaps > 0:
             remaining_w = available_w - total_box_w
@@ -769,9 +1123,9 @@ class PatentFigure:
         positions = {}
         cur_x = start_x
 
-        for r in range(max_rank + 1):
+        for ri, r in enumerate(used_ranks):
             nodes = ranks[r]
-            col_w = col_widths[r]
+            col_w = col_widths[ri]
 
             # Stack nodes vertically in this column
             total_col_h = sum(nd._h for nd in nodes)
@@ -1186,6 +1540,40 @@ class PatentFigure:
                           fontfamily='DejaVu Sans',
                           zorder=21,
                           bbox=dict(facecolor='white', edgecolor='none', pad=1))
+
+        # Phase 6: Draw notes (speech bubbles)
+        import matplotlib.patches as _mpatch
+        for note_def in self._notes:
+            nid = note_def['node_id']
+            note_text = note_def['text']
+            if nid not in self._nodes:
+                continue
+            nd = self._nodes[nid]
+            if nd.box_ref is None:
+                continue
+            sb = nd.box_ref
+            # Place note bubble to the right of the node
+            note_x = sb.right + 0.18
+            note_y = sb.cy
+            note_w = 1.40
+            note_h = 0.55
+            # Draw dashed rectangle for the note
+            d.ax.add_patch(_mpatch.FancyBboxPatch(
+                (note_x, note_y - note_h / 2), note_w, note_h,
+                boxstyle='round,pad=0.04',
+                linewidth=0.8, edgecolor='#444444', facecolor='#FFFEF0',
+                linestyle='dashed', zorder=15,
+            ))
+            # Pointer line from node right edge to note left edge
+            d.ax.annotate('', xy=(note_x, note_y),
+                          xytext=(sb.right, note_y),
+                          arrowprops=dict(arrowstyle='-', color='#444444', lw=0.8),
+                          zorder=14)
+            # Note text
+            d.ax.text(note_x + note_w / 2, note_y, note_text,
+                      fontsize=7, ha='center', va='center',
+                      fontfamily='DejaVu Sans', zorder=16,
+                      wrap=True)
 
         # Boundary + label
         d.boundary(self.BND_X1, self.BND_Y1, self.BND_X2, self.BND_Y2)

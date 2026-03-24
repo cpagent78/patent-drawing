@@ -1,0 +1,5 @@
+S100: Start
+S200: Process A
+S300: Decision
+S400: Branch → S200
+S500: End

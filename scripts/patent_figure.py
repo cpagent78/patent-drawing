@@ -116,6 +116,12 @@ class PatentFigure:
         self._order: list[str] = []            # insertion order
         # Phase 2: Style parameters (None = use library defaults)
         self._style: dict = {}
+        # Phase 5: Highlighted node IDs → style dict
+        self._highlights: dict[str, dict] = {}
+        # Phase 5: Auto-numbering state
+        self._auto_num_prefix: str = ''
+        self._auto_num_counter: int = 100
+        self._auto_num_step: int = 100
 
     def style(self, **kwargs) -> 'PatentFigure':
         """
@@ -147,15 +153,136 @@ class PatentFigure:
         self._style.update(kwargs)
         return self
 
-    def node(self, id: str, text: str, shape: str = 'process') -> 'PatentFigure':
-        """Add a node. shape: process | start | end | diamond | oval | cylinder"""
+    def node(self, id: str, text: str = '', shape: str = 'process') -> 'PatentFigure':
+        """Add a node. shape: process | start | end | diamond | oval | cylinder
+        
+        If text is empty, uses id as text.
+        If auto-numbering is active (see auto_number()), the reference number
+        is prepended automatically to text.
+        """
+        if not text:
+            text = id
         self._nodes[id] = FigNode(id, text, shape)
         self._order.append(id)
         return self
 
+    def highlight(self, *node_ids: str, bg_color: str = '#E8E8E8',
+                  border_lw: float = 2.0) -> 'PatentFigure':
+        """
+        Mark one or more nodes for conditional highlighting.
+        Highlighted nodes are drawn with a gray background and thicker border.
+
+        Args:
+            *node_ids:   One or more node IDs to highlight.
+            bg_color:    Background fill color (default '#E8E8E8' light gray).
+            border_lw:   Border line width multiplier (default 2.0).
+
+        Example::
+
+            fig.highlight('S300', 'S500')   # mark two nodes
+            fig.highlight('S200', bg_color='#FFFACD', border_lw=1.5)  # custom
+        """
+        style = {'bg_color': bg_color, 'border_lw': border_lw}
+        for nid in node_ids:
+            self._highlights[nid] = style
+        return self
+
+    @classmethod
+    def from_spec(cls, fig_label: str, spec_text: str,
+                  direction: str = 'TB') -> 'PatentFigure':
+        """
+        Parse a spec-format text and build a PatentFigure automatically.
+
+        Spec format (one step per line)::
+
+            S100: 로그인 요청 수신
+            S200: 자격증명 검증
+            S300: 검증 실패 시 재시도 횟수 확인
+            S400: 재시도 3회 미만 → S200
+            S500: 재시도 3회 이상 → 계정 잠금
+            S600: 검증 성공 → 세션 토큰 발급
+            S700: 토큰을 사용자 단말로 전송
+
+        Parsing rules:
+        - Lines matching ``Sxxx: text`` define nodes.
+        - First node is shape='start', last node is shape='end'.
+        - ``→ Snnn`` at end of text = back-edge / branch to that node.
+        - Nodes with multiple outgoing edges get shape='diamond'.
+        - Sequential nodes (no → redirect) get a forward edge to the next node.
+
+        Returns:
+            A configured PatentFigure instance ready for render().
+        """
+        import re
+
+        fig = cls(fig_label, direction=direction)
+
+        # Parse lines
+        node_defs = []   # [(id, text, redirect_id or None)]
+        for line in spec_text.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r'^(S\d+)\s*[:：]\s*(.+)$', line)
+            if not m:
+                continue
+            nid = m.group(1)
+            text = m.group(2).strip()
+            # Check for → redirect
+            redirect = None
+            red_m = re.search(r'[→\->]+\s*(S\d+)\s*$', text)
+            if red_m:
+                redirect = red_m.group(1)
+                # Clean up text: remove the redirect part AND the arrow/condition text
+                # E.g. "재시도 횟수 3회 미만 → S200" → "재시도 횟수 3회 미만"
+                text = text[:red_m.start()].rstrip(' \t→\\->').rstrip()
+            # Replace → in text with plain "->" for USPTO compliance
+            text = text.replace('→', '->')
+            node_defs.append((nid, text, redirect))
+
+        if not node_defs:
+            return fig
+
+        # Determine shapes
+        # Nodes that have → redirects are 'diamond' (decision)
+        # First node = start, last node = end
+        # Everything else = process
+        redirect_srcs = {nid for nid, _, r in node_defs if r}
+        # Nodes that are targets of redirect but not in node_defs sequence get auto-added
+        all_ids = {nid for nid, _, _ in node_defs}
+
+        for i, (nid, text, redirect) in enumerate(node_defs):
+            if i == 0:
+                shape = 'start'
+            elif i == len(node_defs) - 1 and redirect is None:
+                shape = 'end'
+            elif nid in redirect_srcs:
+                shape = 'diamond'
+            else:
+                shape = 'process'
+            fig.node(nid, f'{nid}\n{text}', shape=shape)
+
+        # Build edges
+        for i, (nid, text, redirect) in enumerate(node_defs):
+            if redirect:
+                # Forward edge to next (if not last)
+                if i + 1 < len(node_defs):
+                    next_id = node_defs[i + 1][0]
+                    fig.edge(nid, next_id)
+                # Back/branch edge to redirect target
+                fig.edge(nid, redirect)
+            elif i + 1 < len(node_defs):
+                # Sequential forward edge
+                fig.edge(nid, node_defs[i + 1][0])
+
+        return fig
+
     def edge(self, src: str, dst: str, label: str = '', bidir: bool = False) -> 'PatentFigure':
         """Add a directed edge (arrow) from src to dst.
         bidir=True: bidirectional arrow (both arrowheads).
+        
+        Note: Edges referencing non-existent node IDs are silently skipped
+        during rendering (no crash). A warning is printed at render time.
         """
         self._edges.append(FigEdge(src, dst, label, bidir=bidir))
         return self
@@ -291,8 +418,10 @@ class PatentFigure:
         back_edges = self._find_back_edges()
         back_set = {(e.src_id, e.dst_id) for e in back_edges}
 
-        # Build DAG (exclude back-edges)
+        # Build DAG (exclude back-edges, skip edges to non-existent nodes)
         for e in self._edges:
+            if e.src_id not in self._nodes or e.dst_id not in self._nodes:
+                continue
             if (e.src_id, e.dst_id) in back_set:
                 e.is_back = True
                 continue
@@ -328,6 +457,8 @@ class PatentFigure:
         edge_map = {}  # (src,dst) → FigEdge
 
         for e in self._edges:
+            if e.src_id not in self._nodes or e.dst_id not in self._nodes:
+                continue
             adj[e.src_id].append(e.dst_id)
             edge_map[(e.src_id, e.dst_id)] = e
 
@@ -416,32 +547,58 @@ class PatentFigure:
             lr_available_h = (self.BND_Y2 - self.INNER_PAD) - (self.BND_Y1 + self.INNER_PAD)
             n_cols = max_rank + 1
             n_gaps = max_rank
-            # Distribute available_w: target 40% gaps, 60% boxes
-            # But also ensure min gap of 0.50"
-            MIN_H_GAP = 0.50
+            # Distribute available_w: ensure inter-column gap ≥ 1.00" (2 × 0.44" + slack)
+            # so that elbow arrows in the gap have sufficient segment length.
+            # Also ensure box width ≥ max text width so d.box() doesn't auto-expand beyond nd._w.
+            MIN_H_GAP = 1.00   # minimum gap between columns for valid elbow routing
+            
+            # Compute minimum box width required to prevent auto-expansion in d.box()
+            d_tmp = Drawing('/dev/null')
+            min_text_w = 1.00
+            for nd in self._nodes.values():
+                if nd.shape not in ('diamond',):
+                    tw, _ = d_tmp.measure_text(nd.text, self._active_fs)
+                    needed = tw + 0.18  # d.box() uses MIN_PAD_W=0.18
+                    min_text_w = max(min_text_w, needed)
+            
             if n_gaps > 0:
-                target_gap = max(MIN_H_GAP, lr_available_w * 0.38 / n_gaps)
-                target_box_w = (lr_available_w - target_gap * n_gaps) / n_cols
-                target_box_w = max(1.00, target_box_w)
-            else:
-                target_box_w = lr_available_w * 0.50
-            # Recalculate gap with actual box width
-            if n_gaps > 0:
+                # Compute target_box_w: must fit all cols with gap ≥ MIN_H_GAP
+                target_box_w = (lr_available_w - MIN_H_GAP * n_gaps) / n_cols
+                # Must be at least min_text_w to prevent box auto-expansion
+                target_box_w = max(min_text_w, target_box_w)
+                # Recompute actual gap with this box width
                 actual_gap = (lr_available_w - target_box_w * n_cols) / n_gaps
-                actual_gap = max(MIN_H_GAP, actual_gap)
+                if actual_gap < MIN_H_GAP:
+                    # Boxes too wide — accept smaller gap but keep box width for text
+                    actual_gap = max(0.50, actual_gap)
             else:
+                target_box_w = max(min_text_w, lr_available_w * 0.55)
                 actual_gap = 0.0
             # Set width for all nodes
             for nd in self._nodes.values():
                 if nd.shape != 'diamond':
                     nd._w = target_box_w
-            # Set height: for single-row LR, use 55% of page height,
-            # capped at 2:1 height-to-width ratio for natural proportions
+
+            # Set height: fill vertical space based on max nodes in any column
             max_nodes_per_col = max(len(ranks[r]) for r in range(max_rank + 1))
+            MIN_V_GAP_LR = 0.50
+            # For each column, total available height minus gaps
+            # Use the column with most nodes as constraint
             if max_nodes_per_col == 1:
-                target_box_h = lr_available_h * 0.55
-                max_aspect = 2.0   # max height = 2× width for landscape blocks
+                # Single-row: use 65% of available height, capped at 2.5:1 aspect
+                target_box_h = lr_available_h * 0.65
+                max_aspect = 2.5
                 target_box_h = min(target_box_h, target_box_w * max_aspect)
+                for nd in self._nodes.values():
+                    if nd.shape != 'diamond':
+                        nd._h = max(nd._h, target_box_h)
+            else:
+                # Multi-row: distribute height with gaps
+                n_v_gaps = max_nodes_per_col - 1
+                target_box_h = (lr_available_h - MIN_V_GAP_LR * n_v_gaps) / max_nodes_per_col
+                target_box_h = max(nd._h, target_box_h)  # don't shrink below text fit
+                # Cap at 2:1 aspect
+                target_box_h = min(target_box_h, target_box_w * 2.0)
                 for nd in self._nodes.values():
                     if nd.shape != 'diamond':
                         nd._h = max(nd._h, target_box_h)
@@ -582,15 +739,16 @@ class PatentFigure:
         col_widths = [max(nd._w for nd in ranks[r]) for r in range(max_rank + 1)]
 
         # H_GAP between columns
-        # Box widths are pre-computed in _measure_nodes for LR mode.
-        # Recalculate gap based on actual col_widths to match.
-        MIN_H_GAP = 0.50
+        # Minimum inter-column gap must be large enough for elbow arrows (2 × 0.44" + slack).
+        # Also need extra to account for box auto-expansion in d.box().
+        # Use 1.10" as conservative minimum to ensure ≥ 0.44" on each side of mid_x.
+        MIN_H_GAP = 1.10
         n_h_gaps = max_rank
         total_box_w = sum(col_widths)
         if n_h_gaps > 0:
             remaining_w = available_w - total_box_w
             h_gap = max(MIN_H_GAP, remaining_w / n_h_gaps)
-            h_gap = min(1.50, h_gap)
+            h_gap = min(2.00, h_gap)
         else:
             h_gap = 0.80
 
@@ -700,6 +858,21 @@ class PatentFigure:
             nd = self._nodes[nid]
             cx, cy = positions[nid]
 
+            # Phase 5: Conditional highlighting — draw background patch before node
+            hl_style = self._highlights.get(nid)
+            if hl_style:
+                import matplotlib.patches as _patches
+                bg_color = hl_style.get('bg_color', '#E8E8E8')
+                hl_lw = hl_style.get('border_lw', 2.0)
+                pad = 0.06
+                d.ax.add_patch(_patches.FancyBboxPatch(
+                    (cx - nd._w / 2 - pad, cy - nd._h / 2 - pad),
+                    nd._w + pad * 2, nd._h + pad * 2,
+                    boxstyle='round,pad=0.02',
+                    linewidth=hl_lw, edgecolor='black',
+                    facecolor=bg_color, zorder=4,
+                ))
+
             if nd.shape in ('start', 'end'):
                 x = cx - nd._w / 2
                 y = cy - nd._h / 2
@@ -715,6 +888,9 @@ class PatentFigure:
                 x = cx - nd._w / 2
                 y = cy - nd._h / 2
                 nd.box_ref = d.box(x, y, nd._w, nd._h, nd.text, fs=fs)
+
+        # LR mode: per-column-pair channel x cache (computed from actual box_refs)
+        _lr_channel_map: dict = {}
 
         # Draw forward edges (straight/elbow arrows)
         # For skip-rank edges (rank diff > 1), route via side channel to avoid
@@ -732,7 +908,9 @@ class PatentFigure:
         # Sort by rank span (smallest span = innermost/closest channel)
         _skip_edges = [(e, self._nodes[e.src_id], self._nodes[e.dst_id])
                        for e in self._edges
-                       if not e.is_back and (self._nodes[e.dst_id].rank - self._nodes[e.src_id].rank) > 1
+                       if not e.is_back
+                       and e.src_id in self._nodes and e.dst_id in self._nodes
+                       and (self._nodes[e.dst_id].rank - self._nodes[e.src_id].rank) > 1
                        and self._nodes[e.src_id].box_ref and self._nodes[e.dst_id].box_ref]
         _skip_edges.sort(key=lambda t: t[2].rank - t[1].rank)  # smallest span first
         _skip_channel_map = {}  # edge id → channel_x
@@ -742,6 +920,11 @@ class PatentFigure:
 
         for e in self._edges:
             if e.is_back:
+                continue
+            # Guard: skip edges referencing non-existent nodes
+            if e.src_id not in self._nodes or e.dst_id not in self._nodes:
+                import warnings
+                warnings.warn(f"Edge {e.src_id}→{e.dst_id}: node not found, skipping.")
                 continue
             src_nd = self._nodes[e.src_id]
             dst_nd = self._nodes[e.dst_id]
@@ -773,10 +956,43 @@ class PatentFigure:
                         d.arrow_route([sb.right_mid(), db.left_mid()])
                 elif rank_diff == 1:
                     # Adjacent column: right → left of next box
-                    if e.bidir:
-                        d.arrow_bidir_route([sb.right_mid(), db.left_mid()])
+                    # Use elbow routing if source and destination are at different heights.
+                    dy = abs(sb.cy - db.cy)
+                    if dy < 0.05:
+                        # Same height: straight horizontal
+                        if e.bidir:
+                            d.arrow_bidir_route([sb.right_mid(), db.left_mid()])
+                        else:
+                            d.arrow_route([sb.right_mid(), db.left_mid()])
                     else:
-                        d.arrow_route([sb.right_mid(), db.left_mid()])
+                        # Different heights: elbow routing via inter-column gap.
+                        # Use a shared channel x for all edges in this column-pair.
+                        src_rank = src_nd.rank
+                        channel_key = (src_rank, src_rank + 1)
+                        channel_x = _lr_channel_map.get(channel_key)
+                        if channel_x is None:
+                            src_rights = [self._nodes[n].box_ref.right
+                                          for n in self._order
+                                          if self._nodes[n].box_ref and self._nodes[n].rank == src_rank]
+                            dst_lefts = [self._nodes[n].box_ref.left
+                                         for n in self._order
+                                         if self._nodes[n].box_ref and self._nodes[n].rank == src_rank + 1]
+                            if src_rights and dst_lefts:
+                                channel_x = (max(src_rights) + min(dst_lefts)) / 2
+                            else:
+                                channel_x = (sb.right + db.left) / 2
+                            _lr_channel_map[channel_key] = channel_x
+
+                        route_pts = [
+                            sb.right_mid(),
+                            (channel_x, sb.cy),
+                            (channel_x, db.cy),
+                            db.left_mid(),
+                        ]
+                        if e.bidir:
+                            d.arrow_bidir_route(route_pts)
+                        else:
+                            d.arrow_route(route_pts)
                 else:
                     # Skip-rank LR: route via top channel
                     skip_channel_y = min(
@@ -892,6 +1108,8 @@ class PatentFigure:
             min_channel_x = self.BND_X1 + 0.10
 
             for i, e in enumerate(back_edges):
+                if e.src_id not in self._nodes or e.dst_id not in self._nodes:
+                    continue
                 src_nd = self._nodes[e.src_id]
                 dst_nd = self._nodes[e.dst_id]
                 sb = src_nd.box_ref

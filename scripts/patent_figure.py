@@ -1243,6 +1243,57 @@ class PatentFigure:
                 y = cy - nd._h / 2
                 nd.box_ref = d.box(x, y, nd._w, nd._h, nd.text, fs=fs)
 
+        # Phase 7 (Research7): EdgeRouter integration
+        # When corner_radius style param is set, use EdgeRouter for arrow rendering.
+        # d.arrow_route() is monkey-patched to route via EdgeRouter instead.
+        _corner_radius = self._style.get('corner_radius', None)
+        _er = None
+        _er_lw = None
+        if _corner_radius is not None:
+            try:
+                from edge_router import EdgeRouter as _EdgeRouter
+                import patent_drawing_lib as _plib
+                _er = _EdgeRouter(corner_radius=_corner_radius)
+                _er_lw = _plib.LW_ARR  # use same line width as library
+                # Register all node boxes as obstacles
+                for _nd in self._nodes.values():
+                    if _nd.box_ref is not None:
+                        _b = _nd.box_ref
+                        _er.add_obstacle(_b.left, _b.bot, _b.right, _b.top)
+                # Monkey-patch d.arrow_route to use EdgeRouter
+                _orig_arrow_route = d.arrow_route
+                def _er_arrow_route(steps, label='', label_pos=1,
+                                    label_dx=0.18, label_ha='left', ls='-', _er=_er):
+                    pts = d._resolve_steps(steps)
+                    _er.draw(d.ax, pts, color='black', lw=_er_lw, linestyle=ls)
+                    # Still place labels using original code
+                    if label:
+                        import patent_drawing_lib as _pl
+                        idx = d._best_label_segment(pts, label_pos)
+                        if idx is not None:
+                            mx = (pts[idx][0] + pts[idx+1][0]) / 2
+                            my = (pts[idx][1] + pts[idx+1][1]) / 2
+                            if abs(pts[idx][0] - pts[idx+1][0]) < 0.01:
+                                d.ax.text(mx + label_dx, my, label,
+                                         ha=label_ha, va='center',
+                                         fontsize=_pl.FS_BODY, fontweight=_pl.FW,
+                                         bbox=_pl.LABEL_BG, zorder=_pl.Z_ARR_LABEL)
+                            else:
+                                d.ax.text(mx, my + 0.10, label,
+                                         ha='center', va='bottom',
+                                         fontsize=_pl.FS_BODY, fontweight=_pl.FW,
+                                         bbox=_pl.LABEL_BG, zorder=_pl.Z_ARR_LABEL)
+                d.arrow_route = _er_arrow_route
+                # Also patch arrow_bidir_route
+                _orig_bidir_route = d.arrow_bidir_route
+                def _er_bidir_route(steps, label='', _er=_er):
+                    pts = d._resolve_steps(steps)
+                    _er.draw(d.ax, pts, color='black', lw=_er_lw,
+                             arrowhead=True, arrowhead_start=True)
+                d.arrow_bidir_route = _er_bidir_route
+            except ImportError:
+                pass  # fallback: use original drawing methods
+
         # LR mode: per-column-pair channel x cache (computed from actual box_refs)
         _lr_channel_map: dict = {}
 

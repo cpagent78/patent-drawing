@@ -1,0 +1,21 @@
+{
+  "title": "Smart API Platform",
+  "figures": [
+    {
+      "type": "flowchart",
+      "spec_inline": "S100: Receive Request\nS200: Authenticate\nS300: Valid? [diamond]\nS400: Process Request\nS500: Return Response\nS600: Return Error\n",
+      "label": "FIG. 1",
+      "description": "API Request Flow",
+      "output": "suite_fig1.png"
+    },
+    {
+      "type": "state",
+      "spec_inline": "IDLE: 200 Idle [initial]\nACTIVE: 210 Active\nERROR: 220 Error\nIDLE -> ACTIVE: start()\nACTIVE -> IDLE: stop()\nACTIVE -> ERROR: fault()\nERROR -> IDLE: reset()\n",
+      "label": "FIG. 2",
+      "description": "Service State Machine",
+      "output": "suite_fig2.png"
+    }
+  ],
+  "export_index": "suite_index.md",
+  "export_pdf": "suite_drawings.pdf"
+}

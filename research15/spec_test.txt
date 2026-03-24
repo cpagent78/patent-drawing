@@ -1,0 +1,14 @@
+S100: Receive HTTP Request
+S200: Parse Request Parameters
+S300: Validate Input Data
+S400: Authorized? [diamond]
+S500: Process Business Logic
+S600: Send Success Response
+S700: Send Error Response
+
+S100 -> S200
+S200 -> S300
+S300 -> S400
+S400 -> S500: Yes
+S400 -> S700: No
+S500 -> S600

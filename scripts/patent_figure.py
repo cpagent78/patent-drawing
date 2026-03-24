@@ -2448,3 +2448,1748 @@ def _validate_output_files(paths: list) -> list:
         except Exception as e:
             issues.append(f"Cannot open image {p}: {e}")
     return issues
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Research 11: PatentState — State Diagram Support
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PatentState:
+    """
+    USPTO-compliant state machine / state transition diagram.
+
+    Renders UML-style state diagrams:
+    - Rounded-rectangle state nodes (double border for initial/final)
+    - Initial pseudo-state: filled black circle → arrow
+    - Final pseudo-state: bull's-eye (circle in circle)
+    - Transition arrows with optional labels
+    - Self-loop transitions (same state)
+    - Automatic layout (TB or LR)
+
+    Example::
+
+        fig = PatentState('FIG. 4')
+        fig.state('IDLE',       '100\\nIdle State',    initial=True)
+        fig.state('CONNECTING', '200\\nConnecting')
+        fig.state('ACTIVE',     '300\\nActive')
+        fig.state('ERROR',      '400\\nError')
+        fig.state('TERMINATED', '500\\nTerminated',    final=True)
+
+        fig.transition('IDLE',       'CONNECTING', label='connect()')
+        fig.transition('CONNECTING', 'ACTIVE',     label='success')
+        fig.transition('CONNECTING', 'ERROR',      label='timeout')
+        fig.transition('ACTIVE',     'IDLE',       label='disconnect()')
+        fig.transition('ERROR',      'IDLE',       label='reset()')
+        fig.transition('ACTIVE',     'TERMINATED', label='shutdown()')
+        fig.render('fig4.png')
+
+    Supported options:
+    - direction: 'TB' (default) or 'LR'
+    - initial=True / final=True per state
+    - self-loop transitions (src == dst)
+    """
+
+    PAGE_W, PAGE_H = 8.5, 11.0
+    BND_X1, BND_Y1 = 0.55, 1.10
+    BND_X2, BND_Y2 = 7.90, 10.15
+
+    STATE_W = 2.00    # state box width
+    STATE_H = 0.60    # state box height
+    STATE_RX = 0.15   # rounded corner radius (in axes units approx)
+
+    FS_STATE = 8
+    FS_LABEL = 7
+
+    def __init__(self, fig_label: str = 'FIG. 4', direction: str = 'TB'):
+        self.fig_label = fig_label
+        self.direction = direction.upper()
+        self._states: list[dict] = []      # [{id, text, initial, final}]
+        self._transitions: list[dict] = [] # [{src, dst, label}]
+        self._state_ids: set = set()
+
+    def state(self, id: str, text: str = '',
+              initial: bool = False, final: bool = False) -> 'PatentState':
+        """Register a state node.
+
+        Args:
+            id:      Unique state identifier.
+            text:    Display text (use '\\n' to separate ref# from name).
+            initial: If True, draw initial pseudo-state arrow pointing here.
+            final:   If True, draw bull's-eye final marker inside this state.
+        """
+        if not text:
+            text = id
+        self._states.append({
+            'id': id, 'text': text,
+            'initial': initial, 'final': final,
+        })
+        self._state_ids.add(id)
+        return self
+
+    def transition(self, src: str, dst: str, label: str = '') -> 'PatentState':
+        """Add a state transition (arrow).
+
+        Args:
+            src:   Source state id.
+            dst:   Destination state id.
+            label: Transition label (event/guard/action).
+        """
+        self._transitions.append({'src': src, 'dst': dst, 'label': label})
+        return self
+
+    def render(self, output_path: str) -> str:
+        """Render state diagram to PNG."""
+        import os
+        import math
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Circle
+
+        _setup_korean_font()
+
+        fig_num = self.fig_label.replace('FIG. ', '')
+
+        # ── Page setup ────────────────────────────────────────────────────────
+        dpi = 150
+        fig, ax = plt.subplots(figsize=(self.PAGE_W, self.PAGE_H), dpi=dpi)
+        ax.set_xlim(0, self.PAGE_W)
+        ax.set_ylim(0, self.PAGE_H)
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        n = len(self._states)
+        if n == 0:
+            self._draw_boundary(ax)
+            self._draw_fig_label(ax, fig_num)
+            plt.tight_layout(pad=0)
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            plt.savefig(output_path, dpi=dpi, bbox_inches='tight',
+                        facecolor='white')
+            plt.close(fig)
+            return output_path
+
+        # ── Compute layout positions ──────────────────────────────────────────
+        content_x1 = self.BND_X1 + 0.40
+        content_x2 = self.BND_X2 - 0.40
+        content_y1 = self.BND_Y1 + 0.40
+        content_y2 = self.BND_Y2 - 0.40
+        cw = content_x2 - content_x1
+        ch = content_y2 - content_y1
+
+        positions = {}  # id → (cx, cy)
+
+        if self.direction == 'LR':
+            # Left-to-right: states arranged in a row
+            cols = n
+            rows = 1
+            col_w = cw / max(cols, 1)
+            for i, s in enumerate(self._states):
+                cx = content_x1 + (i + 0.5) * col_w
+                cy = content_y1 + ch / 2
+                positions[s['id']] = (cx, cy)
+        else:
+            # Top-to-bottom layout: try to arrange in reasonable grid
+            # Use a topology sort / rough ordering based on transitions
+            # Simple approach: layout in order given, with branches side-by-side
+
+            # Build adjacency for topology hint
+            forward_adj = {s['id']: [] for s in self._states}
+            for t in self._transitions:
+                if t['src'] != t['dst']:
+                    if t['src'] in forward_adj:
+                        forward_adj[t['src']].append(t['dst'])
+
+            # Assign ranks via BFS from initial state
+            rank_map = {}
+            initial_ids = [s['id'] for s in self._states if s['initial']]
+            if not initial_ids:
+                initial_ids = [self._states[0]['id']]
+
+            queue = deque([(initial_ids[0], 0)])
+            visited = set()
+            while queue:
+                sid, rank = queue.popleft()
+                if sid in visited:
+                    continue
+                visited.add(sid)
+                rank_map[sid] = rank
+                for nxt in forward_adj.get(sid, []):
+                    if nxt not in visited:
+                        queue.append((nxt, rank + 1))
+
+            # Assign unvisited states to end
+            max_rank = max(rank_map.values()) if rank_map else 0
+            for s in self._states:
+                if s['id'] not in rank_map:
+                    max_rank += 1
+                    rank_map[s['id']] = max_rank
+
+            # Group by rank
+            rank_groups = defaultdict(list)
+            for s in self._states:
+                rank_groups[rank_map[s['id']]].append(s['id'])
+
+            n_ranks = max(rank_map.values()) + 1
+            row_h = ch / max(n_ranks, 1)
+
+            for rank, sids in rank_groups.items():
+                n_in_row = len(sids)
+                row_w = cw / max(n_in_row, 1)
+                cy = content_y2 - (rank + 0.5) * row_h
+                for j, sid in enumerate(sids):
+                    cx = content_x1 + (j + 0.5) * row_w
+                    positions[sid] = (cx, cy)
+
+        # ── Draw initial pseudo-state ─────────────────────────────────────────
+        INIT_R = 0.08
+        for s in self._states:
+            if s['initial']:
+                cx, cy = positions[s['id']]
+                # position: above the state box
+                init_cy = cy + self.STATE_H / 2 + 0.35
+                init_cx = cx
+                # Filled circle
+                circ = Circle((init_cx, init_cy), INIT_R,
+                               color='black', zorder=15)
+                ax.add_patch(circ)
+                # Arrow from circle bottom to state top
+                ax.annotate('', xy=(cx, cy + self.STATE_H / 2),
+                             xytext=(init_cx, init_cy - INIT_R),
+                             arrowprops=dict(
+                                 arrowstyle='->', color='black', lw=1.2,
+                                 mutation_scale=10,
+                             ), zorder=14)
+
+        # ── Draw state boxes ──────────────────────────────────────────────────
+        state_patches = {}
+        for s in self._states:
+            cx, cy = positions[s['id']]
+            x = cx - self.STATE_W / 2
+            y = cy - self.STATE_H / 2
+            # Outer box
+            patch = FancyBboxPatch(
+                (x, y), self.STATE_W, self.STATE_H,
+                boxstyle=f'round,pad=0.02',
+                linewidth=1.5 if not s['final'] else 2.5,
+                edgecolor='black', facecolor='white', zorder=10
+            )
+            ax.add_patch(patch)
+            state_patches[s['id']] = patch
+
+            # Double border for initial state (extra inner rect)
+            if s['initial']:
+                inner = FancyBboxPatch(
+                    (x + 0.04, y + 0.04), self.STATE_W - 0.08, self.STATE_H - 0.08,
+                    boxstyle='round,pad=0.01',
+                    linewidth=0.7, edgecolor='black', facecolor='none', zorder=11
+                )
+                ax.add_patch(inner)
+
+            # Final state: bull's-eye inner circle
+            if s['final']:
+                bull_r = min(self.STATE_W, self.STATE_H) * 0.18
+                circ_out = Circle((cx, cy), bull_r + 0.04,
+                                   color='black', zorder=11)
+                circ_in  = Circle((cx, cy), bull_r,
+                                   color='white', zorder=12)
+                circ_dot = Circle((cx, cy), bull_r * 0.45,
+                                   color='black', zorder=13)
+                ax.add_patch(circ_out)
+                ax.add_patch(circ_in)
+                ax.add_patch(circ_dot)
+
+            # State label text
+            lines = s['text'].split('\n')
+            text_str = '\n'.join(lines)
+            ax.text(cx, cy, text_str,
+                    ha='center', va='center',
+                    fontsize=self.FS_STATE, zorder=12,
+                    bbox=dict(facecolor='white', edgecolor='none', pad=0))
+
+        # ── Draw transitions ──────────────────────────────────────────────────
+        # Track multi-edges between same pair to offset them
+        edge_count = defaultdict(int)
+
+        for t in self._transitions:
+            src = t['src']
+            dst = t['dst']
+            label = t.get('label', '')
+
+            if src not in positions or dst not in positions:
+                continue
+
+            sx, sy = positions[src]
+            dx, dy = positions[dst]
+
+            if src == dst:
+                # Self-loop: arc above the state box
+                self._draw_self_loop(ax, sx, sy, label)
+                continue
+
+            # Determine entry/exit points based on relative position
+            dx_rel = dx - sx
+            dy_rel = dy - sy
+
+            # Exit from state edge, enter from state edge
+            if abs(dy_rel) >= abs(dx_rel):
+                # Primarily vertical
+                if dy_rel > 0:
+                    # going up
+                    p0 = (sx, sy + self.STATE_H / 2)
+                    p1 = (dx, dy - self.STATE_H / 2)
+                else:
+                    # going down
+                    p0 = (sx, sy - self.STATE_H / 2)
+                    p1 = (dx, dy + self.STATE_H / 2)
+            else:
+                # Primarily horizontal
+                if dx_rel > 0:
+                    p0 = (sx + self.STATE_W / 2, sy)
+                    p1 = (dx - self.STATE_W / 2, dy)
+                else:
+                    p0 = (sx - self.STATE_W / 2, sy)
+                    p1 = (dx + self.STATE_W / 2, dy)
+
+            # Check if a reverse edge exists (to offset with curve)
+            key = (src, dst)
+            rev_key = (dst, src)
+            # Count usage to offset
+            edge_count[key] += 1
+            has_reverse = any(
+                t2['src'] == dst and t2['dst'] == src
+                for t2 in self._transitions
+                if t2 != t
+            )
+
+            rad = 0.0
+            if has_reverse:
+                rad = 0.25 if edge_count[key] <= 1 else -0.25
+
+            self._draw_transition(ax, p0, p1, label, rad=rad)
+
+        # ── Boundary + FIG. label ─────────────────────────────────────────────
+        self._draw_boundary(ax)
+        self._draw_fig_label(ax, fig_num)
+
+        plt.tight_layout(pad=0)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        plt.savefig(output_path, dpi=dpi, bbox_inches='tight',
+                    facecolor='white')
+        plt.close(fig)
+        return output_path
+
+    def _draw_self_loop(self, ax, cx, cy, label: str):
+        """Draw a self-transition loop above the state box."""
+        import matplotlib.patches as mpatches
+        top_y = cy + self.STATE_H / 2
+        # Arc from top-left to top-right going up
+        loop_h = 0.30
+        loop_w = self.STATE_W * 0.6
+        from matplotlib.patches import FancyArrowPatch
+        ax.annotate('', xy=(cx + loop_w * 0.3, top_y),
+                     xytext=(cx - loop_w * 0.3, top_y),
+                     arrowprops=dict(
+                         arrowstyle='->', color='black', lw=1.0,
+                         mutation_scale=10,
+                         connectionstyle=f'arc3,rad=-0.6',
+                     ), zorder=13)
+        if label:
+            ax.text(cx, top_y + loop_h * 0.6, label,
+                    ha='center', va='bottom',
+                    fontsize=self.FS_LABEL, zorder=14,
+                    bbox=dict(facecolor='white', edgecolor='none', pad=1))
+
+    def _draw_transition(self, ax, p0, p1, label: str, rad: float = 0.0):
+        """Draw a transition arrow from p0 to p1."""
+        conn = f'arc3,rad={rad:.2f}' if rad != 0.0 else 'arc3,rad=0'
+        ax.annotate('', xy=p1, xytext=p0,
+                     arrowprops=dict(
+                         arrowstyle='->', color='black', lw=1.0,
+                         mutation_scale=10,
+                         connectionstyle=conn,
+                     ), zorder=13)
+        if label:
+            # Place label near midpoint, slightly offset
+            mx = (p0[0] + p1[0]) / 2
+            my = (p0[1] + p1[1]) / 2
+            # Offset perpendicular to direction
+            dx = p1[0] - p0[0]
+            dy = p1[1] - p0[1]
+            length = max(0.01, (dx**2 + dy**2) ** 0.5)
+            # Perpendicular unit vector
+            perp_x = -dy / length * 0.12
+            perp_y =  dx / length * 0.12
+            if rad != 0.0:
+                perp_x *= (1 + abs(rad) * 2)
+                perp_y *= (1 + abs(rad) * 2)
+            ax.text(mx + perp_x, my + perp_y, label,
+                    ha='center', va='center',
+                    fontsize=self.FS_LABEL, zorder=14,
+                    bbox=dict(facecolor='white', edgecolor='none', pad=1))
+
+    def _draw_boundary(self, ax):
+        import matplotlib.patches as mpatches
+        rect = mpatches.Rectangle(
+            (self.BND_X1, self.BND_Y1),
+            self.BND_X2 - self.BND_X1,
+            self.BND_Y2 - self.BND_Y1,
+            linewidth=1.5, edgecolor='black', facecolor='none',
+            linestyle='dashed', zorder=1
+        )
+        ax.add_patch(rect)
+
+    def _draw_fig_label(self, ax, fig_num: str):
+        cx = (self.BND_X1 + self.BND_X2) / 2
+        cy = self.BND_Y1 - 0.25
+        ax.text(cx, cy, f'FIG. {fig_num}',
+                ha='center', va='center', fontsize=11, zorder=20)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Research 11: Hardware Block Diagram Shapes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PatentHardware:
+    """
+    Hardware/semiconductor patent block diagrams with specialized shapes.
+
+    Supports IC chip shape, multiplexer (trapezoid), register cells,
+    and memory array blocks. Connects with standard arrows.
+
+    Example::
+
+        fig = PatentHardware('FIG. 2')
+        cpu = fig.chip('CPU', '610\\nALU Core', cx=2.5, cy=7.0)
+        cache = fig.register('CACHE', '620\\nCache', cx=2.5, cy=5.5, cells=4)
+        mem = fig.memory_array('MEM', '630\\nMemory', cx=5.5, cy=7.0,
+                               rows=4, cols=4)
+        mux_b = fig.mux('MUX', '640\\nMUX', cx=2.5, cy=4.0)
+        fig.connect(cpu, cache, label='bus')
+        fig.connect(cache, mux_b)
+        fig.connect(mux_b, mem, label='data')
+        fig.render('fig2_hw.png')
+    """
+
+    PAGE_W, PAGE_H = 8.5, 11.0
+    BND_X1, BND_Y1 = 0.55, 1.10
+    BND_X2, BND_Y2 = 7.90, 10.15
+    FS_LABEL = 8
+
+    def __init__(self, fig_label: str = 'FIG. 2'):
+        self.fig_label = fig_label
+        self._elements: list[dict] = []  # [{id, type, cx, cy, w, h, text, ...}]
+        self._connections: list[dict] = []  # [{src_id, dst_id, label, bidir}]
+        self._element_map: dict = {}
+
+    def chip(self, id: str, text: str, cx: float, cy: float,
+             w: float = 1.60, h: float = 0.80,
+             n_pins_left: int = 3, n_pins_right: int = 3) -> dict:
+        """IC chip shape: rectangle with pin stubs on sides."""
+        e = dict(id=id, type='chip', cx=cx, cy=cy, w=w, h=h, text=text,
+                 n_pins_left=n_pins_left, n_pins_right=n_pins_right)
+        self._elements.append(e)
+        self._element_map[id] = e
+        return e
+
+    def mux(self, id: str, text: str, cx: float, cy: float,
+            w: float = 0.80, h: float = 1.20,
+            direction: str = 'right') -> dict:
+        """Multiplexer shape: trapezoid wider at input side."""
+        e = dict(id=id, type='mux', cx=cx, cy=cy, w=w, h=h, text=text,
+                 direction=direction)
+        self._elements.append(e)
+        self._element_map[id] = e
+        return e
+
+    def register(self, id: str, text: str, cx: float, cy: float,
+                 cells: int = 4, cell_w: float = 0.35,
+                 cell_h: float = 0.40) -> dict:
+        """Register: row of cells (sub-divided rectangle)."""
+        total_w = cells * cell_w
+        e = dict(id=id, type='register', cx=cx, cy=cy,
+                 w=total_w, h=cell_h, text=text, cells=cells,
+                 cell_w=cell_w, cell_h=cell_h)
+        self._elements.append(e)
+        self._element_map[id] = e
+        return e
+
+    def memory_array(self, id: str, text: str, cx: float, cy: float,
+                     rows: int = 4, cols: int = 4,
+                     cell_w: float = 0.22, cell_h: float = 0.20) -> dict:
+        """Memory array: grid of cells."""
+        total_w = cols * cell_w
+        total_h = rows * cell_h
+        e = dict(id=id, type='memory_array', cx=cx, cy=cy,
+                 w=total_w, h=total_h, text=text,
+                 rows=rows, cols=cols, cell_w=cell_w, cell_h=cell_h)
+        self._elements.append(e)
+        self._element_map[id] = e
+        return e
+
+    def block(self, id: str, text: str, cx: float, cy: float,
+              w: float = 1.40, h: float = 0.60) -> dict:
+        """Simple rectangular block."""
+        e = dict(id=id, type='block', cx=cx, cy=cy, w=w, h=h, text=text)
+        self._elements.append(e)
+        self._element_map[id] = e
+        return e
+
+    def connect(self, src, dst, label: str = '', bidir: bool = False) -> 'PatentHardware':
+        """Connect two elements with an arrow.
+
+        Args:
+            src/dst: element dict (returned by chip/mux/etc.) or element id string.
+            label:   optional label.
+            bidir:   if True, double-headed arrow.
+        """
+        src_id = src['id'] if isinstance(src, dict) else src
+        dst_id = dst['id'] if isinstance(dst, dict) else dst
+        self._connections.append(dict(src_id=src_id, dst_id=dst_id,
+                                      label=label, bidir=bidir))
+        return self
+
+    def render(self, output_path: str) -> str:
+        """Render hardware block diagram to PNG."""
+        import os
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.patches import FancyBboxPatch, Polygon
+
+        _setup_korean_font()
+        fig_num = self.fig_label.replace('FIG. ', '')
+
+        dpi = 150
+        fig, ax = plt.subplots(figsize=(self.PAGE_W, self.PAGE_H), dpi=dpi)
+        ax.set_xlim(0, self.PAGE_W)
+        ax.set_ylim(0, self.PAGE_H)
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        elem_bounds = {}  # id → (x1, y1, x2, y2)
+
+        for e in self._elements:
+            cx, cy = e['cx'], e['cy']
+            w, h = e['w'], e['h']
+            x1, y1 = cx - w/2, cy - h/2
+            x2, y2 = cx + w/2, cy + h/2
+            elem_bounds[e['id']] = (x1, y1, x2, y2)
+
+            if e['type'] == 'block':
+                patch = FancyBboxPatch((x1, y1), w, h,
+                                        boxstyle='square,pad=0',
+                                        lw=1.3, edgecolor='black',
+                                        facecolor='white', zorder=10)
+                ax.add_patch(patch)
+                ax.text(cx, cy, e['text'], ha='center', va='center',
+                        fontsize=self.FS_LABEL, zorder=11)
+
+            elif e['type'] == 'chip':
+                # Main body
+                patch = FancyBboxPatch((x1, y1), w, h,
+                                        boxstyle='square,pad=0',
+                                        lw=1.5, edgecolor='black',
+                                        facecolor='white', zorder=10)
+                ax.add_patch(patch)
+                ax.text(cx, cy, e['text'], ha='center', va='center',
+                        fontsize=self.FS_LABEL, zorder=11)
+                # Left pins
+                n_left = e.get('n_pins_left', 3)
+                pin_len = 0.18
+                if n_left > 0:
+                    pin_ys = [y1 + (i + 1) * h / (n_left + 1)
+                               for i in range(n_left)]
+                    for py in pin_ys:
+                        ax.plot([x1 - pin_len, x1], [py, py],
+                                color='black', lw=1.0, zorder=9)
+                # Right pins
+                n_right = e.get('n_pins_right', 3)
+                if n_right > 0:
+                    pin_ys = [y1 + (i + 1) * h / (n_right + 1)
+                               for i in range(n_right)]
+                    for py in pin_ys:
+                        ax.plot([x2, x2 + pin_len], [py, py],
+                                color='black', lw=1.0, zorder=9)
+
+            elif e['type'] == 'mux':
+                # Trapezoid shape
+                d = e.get('direction', 'right')
+                taper = h * 0.25  # taper amount
+                if d == 'right':
+                    # wider on left (input), narrower on right (output)
+                    pts = [
+                        (x1, y1),
+                        (x2, y1 + taper),
+                        (x2, y2 - taper),
+                        (x1, y2),
+                    ]
+                else:
+                    pts = [
+                        (x1, y1 + taper),
+                        (x2, y1),
+                        (x2, y2),
+                        (x1, y2 - taper),
+                    ]
+                poly = Polygon(pts, closed=True,
+                                linewidth=1.3, edgecolor='black',
+                                facecolor='white', zorder=10)
+                ax.add_patch(poly)
+                ax.text(cx, cy, e['text'], ha='center', va='center',
+                        fontsize=self.FS_LABEL, zorder=11)
+
+            elif e['type'] == 'register':
+                cells = e['cells']
+                cw = e['cell_w']
+                ch = e['cell_h']
+                # Outer border
+                patch = FancyBboxPatch((x1, y1), w, h,
+                                        boxstyle='square,pad=0',
+                                        lw=1.5, edgecolor='black',
+                                        facecolor='white', zorder=10)
+                ax.add_patch(patch)
+                # Cell dividers
+                for ci in range(1, cells):
+                    lx = x1 + ci * cw
+                    ax.plot([lx, lx], [y1, y2],
+                            color='black', lw=0.8, zorder=11)
+                # Label above
+                ax.text(cx, y2 + 0.08, e['text'],
+                        ha='center', va='bottom',
+                        fontsize=self.FS_LABEL - 1, zorder=12)
+
+            elif e['type'] == 'memory_array':
+                rows = e['rows']
+                cols = e['cols']
+                cw = e['cell_w']
+                ch = e['cell_h']
+                # Outer border
+                patch = mpatches.Rectangle((x1, y1), w, h,
+                                            lw=1.5, edgecolor='black',
+                                            facecolor='white', zorder=10)
+                ax.add_patch(patch)
+                # Row lines
+                for ri in range(1, rows):
+                    ly = y1 + ri * ch
+                    ax.plot([x1, x2], [ly, ly],
+                            color='black', lw=0.6, zorder=11)
+                # Col lines
+                for ci in range(1, cols):
+                    lx = x1 + ci * cw
+                    ax.plot([lx, lx], [y1, y2],
+                            color='black', lw=0.6, zorder=11)
+                # Label above
+                ax.text(cx, y2 + 0.08, e['text'],
+                        ha='center', va='bottom',
+                        fontsize=self.FS_LABEL - 1, zorder=12)
+
+        # ── Draw connections ──────────────────────────────────────────────────
+        for conn in self._connections:
+            src_id = conn['src_id']
+            dst_id = conn['dst_id']
+            if src_id not in elem_bounds or dst_id not in elem_bounds:
+                continue
+            sx1, sy1, sx2, sy2 = elem_bounds[src_id]
+            dx1, dy1, dx2, dy2 = elem_bounds[dst_id]
+            scx = (sx1 + sx2) / 2
+            scy = (sy1 + sy2) / 2
+            dcx = (dx1 + dx2) / 2
+            dcy = (dy1 + dy2) / 2
+
+            # Simple nearest-edge connection
+            # Determine direction
+            ddx = dcx - scx
+            ddy = dcy - scy
+            if abs(ddy) >= abs(ddx):
+                if ddy > 0:
+                    p0 = (scx, sy2)
+                    p1 = (dcx, dy1)
+                else:
+                    p0 = (scx, sy1)
+                    p1 = (dcx, dy2)
+            else:
+                if ddx > 0:
+                    p0 = (sx2, scy)
+                    p1 = (dx1, dcy)
+                else:
+                    p0 = (sx1, scy)
+                    p1 = (dx2, dcy)
+
+            style = '<->' if conn['bidir'] else '->'
+            ax.annotate('', xy=p1, xytext=p0,
+                         arrowprops=dict(
+                             arrowstyle=style, color='black', lw=1.1,
+                             mutation_scale=10,
+                         ), zorder=13)
+
+            if conn['label']:
+                mx = (p0[0] + p1[0]) / 2
+                my = (p0[1] + p1[1]) / 2
+                ax.text(mx + 0.08, my, conn['label'],
+                        ha='left', va='center',
+                        fontsize=self.FS_LABEL - 1, zorder=14,
+                        bbox=dict(facecolor='white', edgecolor='none', pad=1))
+
+        # ── Boundary + FIG. label ─────────────────────────────────────────────
+        bnd = mpatches.Rectangle(
+            (self.BND_X1, self.BND_Y1),
+            self.BND_X2 - self.BND_X1, self.BND_Y2 - self.BND_Y1,
+            lw=1.5, edgecolor='black', facecolor='none',
+            linestyle='dashed', zorder=1
+        )
+        ax.add_patch(bnd)
+        cx_bnd = (self.BND_X1 + self.BND_X2) / 2
+        ax.text(cx_bnd, self.BND_Y1 - 0.25, f'FIG. {fig_num}',
+                ha='center', va='center', fontsize=11, zorder=20)
+
+        plt.tight_layout(pad=0)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        plt.savefig(output_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+        return output_path
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Research 12: PatentLayered — Layered Architecture Diagram
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PatentLayered:
+    """
+    Layered (horizontal band) architecture diagram for software patent figures.
+
+    Each layer is a full-width horizontal band containing component boxes.
+    Interface arrows connect layers vertically.
+
+    Example::
+
+        fig = PatentLayered('FIG. 2')
+        fig.layer('Application Layer', ['Browser', 'Mobile App', 'API Client'],
+                  ref='100')
+        fig.layer('Service Layer',     ['Auth Service', 'Business Logic', 'Cache'],
+                  ref='200')
+        fig.layer('Data Layer',        ['PostgreSQL', 'Redis', 'S3'],
+                  ref='300')
+        fig.interface('100', '200', label='REST API')
+        fig.interface('200', '300', label='ORM/Query')
+        fig.render('fig2.png')
+    """
+
+    PAGE_W, PAGE_H = 8.5, 11.0
+    BND_X1, BND_Y1 = 0.55, 1.10
+    BND_X2, BND_Y2 = 7.90, 10.15
+
+    FS_LAYER  = 9
+    FS_COMP   = 8
+    FS_IFACE  = 7
+
+    COMP_H    = 0.55   # component box height
+    COMP_PAD  = 0.20   # horizontal padding between components
+
+    def __init__(self, fig_label: str = 'FIG. 2'):
+        self.fig_label = fig_label
+        self._layers: list[dict] = []     # [{name, components, ref}]
+        self._interfaces: list[dict] = [] # [{ref_top, ref_bot, label}]
+        self._ref_to_idx: dict = {}
+
+    def layer(self, name: str, components: list,
+              ref: str = '') -> 'PatentLayered':
+        """Add a horizontal layer.
+
+        Args:
+            name:       Layer display name.
+            components: List of component names (strings).
+            ref:        Reference number for the layer.
+        """
+        idx = len(self._layers)
+        self._layers.append(dict(name=name, components=components, ref=ref))
+        if ref:
+            self._ref_to_idx[ref] = idx
+        return self
+
+    def interface(self, ref_top: str, ref_bot: str,
+                  label: str = '') -> 'PatentLayered':
+        """Add an interface arrow between two layers.
+
+        Args:
+            ref_top: Reference number of the upper layer.
+            ref_bot: Reference number of the lower layer.
+            label:   Interface label.
+        """
+        self._interfaces.append(dict(ref_top=ref_top, ref_bot=ref_bot,
+                                     label=label))
+        return self
+
+    def render(self, output_path: str) -> str:
+        """Render layered architecture diagram to PNG."""
+        import os
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.patches import FancyBboxPatch
+
+        _setup_korean_font()
+        fig_num = self.fig_label.replace('FIG. ', '')
+
+        dpi = 150
+        fig, ax = plt.subplots(figsize=(self.PAGE_W, self.PAGE_H), dpi=dpi)
+        ax.set_xlim(0, self.PAGE_W)
+        ax.set_ylim(0, self.PAGE_H)
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        n_layers = len(self._layers)
+        if n_layers == 0:
+            self._draw_frame(ax, fig_num)
+            plt.tight_layout(pad=0)
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            plt.savefig(output_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+            plt.close(fig)
+            return output_path
+
+        content_x1 = self.BND_X1 + 0.40
+        content_x2 = self.BND_X2 - 0.15
+        content_y1 = self.BND_Y1 + 0.40
+        content_y2 = self.BND_Y2 - 0.30
+        content_w  = content_x2 - content_x1
+        content_h  = content_y2 - content_y1
+
+        # Layer height: split evenly
+        layer_h = content_h / n_layers
+        # Reserve some height for layer label + padding
+        LAYER_LABEL_H = 0.25
+        LAYER_PAD_TOP = 0.10
+        LAYER_PAD_BOT = 0.12
+        comp_area_h = layer_h - LAYER_LABEL_H - LAYER_PAD_TOP - LAYER_PAD_BOT
+
+        # Interface arrow region between layers
+        IFACE_H = 0.30
+        # Recalculate: layers take up (content_h - n_gaps * IFACE_H) / n_layers
+        n_gaps = max(n_layers - 1, 0)
+        layer_h_adj = (content_h - n_gaps * IFACE_H) / n_layers
+        comp_area_h_adj = layer_h_adj - LAYER_LABEL_H - LAYER_PAD_TOP - LAYER_PAD_BOT
+
+        layer_rects = {}  # ref → (x1, y1, x2, y2) of layer band
+
+        for li, layer in enumerate(self._layers):
+            # Top layer at top
+            top_y = content_y2 - li * (layer_h_adj + IFACE_H)
+            bot_y = top_y - layer_h_adj
+            lx1 = content_x1
+            lx2 = content_x2
+
+            layer_rects[layer['ref']] = (lx1, bot_y, lx2, top_y)
+
+            # Layer band border
+            patch = mpatches.Rectangle(
+                (lx1, bot_y), content_w, layer_h_adj,
+                lw=1.2, edgecolor='black', facecolor='none', zorder=5
+            )
+            ax.add_patch(patch)
+
+            # Layer reference number on the left
+            ref_text = layer['ref'] + '\n' if layer['ref'] else ''
+            ax.text(lx1 - 0.12, (top_y + bot_y) / 2,
+                    ref_text + layer['name'],
+                    ha='right', va='center',
+                    fontsize=self.FS_LAYER, zorder=10,
+                    rotation=90 if layer_h_adj < 0.6 else 0)
+
+            # Components inside the layer
+            comps = layer['components']
+            n_comps = len(comps)
+            if n_comps > 0:
+                comp_total_w = content_w - 2 * self.COMP_PAD
+                comp_w = (comp_total_w - (n_comps - 1) * self.COMP_PAD) / n_comps
+                comp_h = min(self.COMP_H, comp_area_h_adj - 0.06)
+                comp_y1 = (top_y + bot_y) / 2 - comp_h / 2
+
+                for ci, comp_name in enumerate(comps):
+                    cx1 = lx1 + self.COMP_PAD + ci * (comp_w + self.COMP_PAD)
+                    cx2 = cx1 + comp_w
+                    ccx = (cx1 + cx2) / 2
+                    ccy = comp_y1 + comp_h / 2
+
+                    comp_patch = FancyBboxPatch(
+                        (cx1, comp_y1), comp_w, comp_h,
+                        boxstyle='square,pad=0',
+                        lw=1.0, edgecolor='black', facecolor='white', zorder=10
+                    )
+                    ax.add_patch(comp_patch)
+                    ax.text(ccx, ccy, comp_name,
+                            ha='center', va='center',
+                            fontsize=self.FS_COMP, zorder=11)
+
+        # ── Draw interfaces ───────────────────────────────────────────────────
+        for iface in self._interfaces:
+            r_top = iface['ref_top']
+            r_bot = iface['ref_bot']
+            label = iface.get('label', '')
+
+            # Find the bottom of the top layer and top of the bottom layer
+            if r_top in layer_rects and r_bot in layer_rects:
+                tx1, ty1, tx2, ty2 = layer_rects[r_top]
+                bx1, by1, bx2, by2 = layer_rects[r_bot]
+
+                # Arrow from bottom of top layer to top of bottom layer
+                arrow_x = (tx1 + tx2) / 2
+                p0 = (arrow_x, ty1)   # bottom of top layer
+                p1 = (arrow_x, by2)   # top of bottom layer
+
+                ax.annotate('', xy=p1, xytext=p0,
+                             arrowprops=dict(
+                                 arrowstyle='->', color='black', lw=1.2,
+                                 mutation_scale=11,
+                             ), zorder=13)
+                if label:
+                    my = (p0[1] + p1[1]) / 2
+                    ax.text(arrow_x + 0.10, my, label,
+                            ha='left', va='center',
+                            fontsize=self.FS_IFACE, zorder=14,
+                            bbox=dict(facecolor='white', edgecolor='none', pad=1))
+
+        self._draw_frame(ax, fig_num)
+        plt.tight_layout(pad=0)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        plt.savefig(output_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+        return output_path
+
+    def _draw_frame(self, ax, fig_num: str):
+        import matplotlib.patches as mpatches
+        bnd = mpatches.Rectangle(
+            (self.BND_X1, self.BND_Y1),
+            self.BND_X2 - self.BND_X1, self.BND_Y2 - self.BND_Y1,
+            lw=1.5, edgecolor='black', facecolor='none',
+            linestyle='dashed', zorder=1
+        )
+        ax.add_patch(bnd)
+        cx = (self.BND_X1 + self.BND_X2) / 2
+        ax.text(cx, self.BND_Y1 - 0.25, f'FIG. {fig_num}',
+                ha='center', va='center', fontsize=11, zorder=20)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Research 12: PatentTiming — Timing Diagram
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PatentTiming:
+    """
+    Timing diagram for hardware/communication patent figures.
+
+    Renders digital signals as waveforms with clock, data, and control lines.
+    Supports vertical time markers.
+
+    Example::
+
+        fig = PatentTiming('FIG. 5')
+        fig.signal('CLK',   '100', wave='clock', period=1.0)
+        fig.signal('DATA',  '200', wave=[0,0,1,1,0,1,0,0],
+                   labels=['D0','D1','D2','D3'])
+        fig.signal('VALID', '300', wave=[0,1,1,1,1,1,0,0])
+        fig.signal('READY', '400', wave=[0,0,1,0,1,1,1,0])
+        fig.marker(t=2.0, label='T_setup')
+        fig.marker(t=6.0, label='T_hold')
+        fig.render('fig5.png')
+    """
+
+    PAGE_W, PAGE_H = 8.5, 11.0
+    BND_X1, BND_Y1 = 0.55, 1.10
+    BND_X2, BND_Y2 = 7.90, 10.15
+
+    FS_SIGNAL = 8
+    FS_MARKER = 7
+    FS_LABEL  = 7
+
+    SIGNAL_H    = 0.40   # height of each signal track
+    SIGNAL_GAP  = 0.15   # gap between signal tracks
+    WAVE_HIGH   = 0.28   # waveform high level height
+    WAVE_LOW    = 0.00   # waveform low level
+    TRANSITION_W = 0.08  # transition slope width
+    LEFT_MARGIN  = 1.20  # width for signal name + ref
+
+    def __init__(self, fig_label: str = 'FIG. 5'):
+        self.fig_label = fig_label
+        self._signals: list[dict] = []   # [{name, ref, wave, period, labels}]
+        self._markers: list[dict] = []   # [{t, label}]
+
+    def signal(self, name: str, ref: str = '',
+               wave='clock', period: float = 1.0,
+               labels: list = None) -> 'PatentTiming':
+        """Add a signal to the timing diagram.
+
+        Args:
+            name:   Signal name (e.g. 'CLK', 'DATA').
+            ref:    Reference number.
+            wave:   'clock' for square wave, or list of 0/1/'X' values.
+            period: Clock period (used only for wave='clock').
+            labels: Optional data labels for transitions.
+        """
+        self._signals.append(dict(
+            name=name, ref=ref, wave=wave,
+            period=period, labels=labels or [],
+        ))
+        return self
+
+    def marker(self, t: float, label: str = '') -> 'PatentTiming':
+        """Add a vertical time marker (dashed line)."""
+        self._markers.append(dict(t=t, label=label))
+        return self
+
+    def render(self, output_path: str) -> str:
+        """Render timing diagram to PNG."""
+        import os
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.patches import FancyBboxPatch
+
+        _setup_korean_font()
+        fig_num = self.fig_label.replace('FIG. ', '')
+
+        dpi = 150
+        fig, ax = plt.subplots(figsize=(self.PAGE_W, self.PAGE_H), dpi=dpi)
+        ax.set_xlim(0, self.PAGE_W)
+        ax.set_ylim(0, self.PAGE_H)
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        n_signals = len(self._signals)
+        if n_signals == 0:
+            self._draw_frame(ax, fig_num)
+            self._save(fig, ax, output_path, dpi, fig_num)
+            return output_path
+
+        content_x1 = self.BND_X1 + 0.20
+        content_x2 = self.BND_X2 - 0.20
+        content_y2 = self.BND_Y2 - 0.30
+        wave_x1 = content_x1 + self.LEFT_MARGIN
+        wave_x2 = content_x2 - 0.15
+        wave_w  = wave_x2 - wave_x1
+
+        track_h = self.SIGNAL_H + self.SIGNAL_GAP
+        total_h = n_signals * track_h
+        start_y = content_y2 - 0.20
+
+        # Determine total time units
+        max_t = 8
+        for s in self._signals:
+            if isinstance(s['wave'], list):
+                max_t = max(max_t, len(s['wave']))
+            elif s['wave'] == 'clock':
+                max_t = max(max_t, int(16 / max(s['period'], 0.1)))
+        max_t = max(max_t, 8)
+
+        t_scale = wave_w / max_t  # pixels per time unit
+
+        for si, sig in enumerate(self._signals):
+            track_y_top = start_y - si * track_h
+            track_y_bot = track_y_top - self.SIGNAL_H
+            track_cy    = (track_y_top + track_y_bot) / 2
+
+            # Signal name + reference number
+            ref_line = sig['ref'] + '\n' if sig['ref'] else ''
+            name_text = ref_line + sig['name']
+            ax.text(content_x1 + self.LEFT_MARGIN - 0.12, track_cy,
+                    name_text,
+                    ha='right', va='center',
+                    fontsize=self.FS_SIGNAL, zorder=10)
+
+            # Baseline (low level)
+            baseline_y = track_y_bot + 0.05
+            high_y     = baseline_y + self.WAVE_HIGH
+
+            # Build waveform
+            xs, ys = [], []
+
+            if sig['wave'] == 'clock':
+                period = sig['period']
+                t = 0.0
+                level = 0
+                xs.append(wave_x1)
+                ys.append(baseline_y if level == 0 else high_y)
+                while t < max_t:
+                    # Rising edge
+                    x_rise = wave_x1 + t * t_scale
+                    xs += [x_rise, x_rise]
+                    ys += [baseline_y, high_y]
+                    # Falling edge
+                    x_fall = wave_x1 + (t + period / 2) * t_scale
+                    xs += [x_fall, x_fall]
+                    ys += [high_y, baseline_y]
+                    t += period
+                xs.append(wave_x2)
+                ys.append(baseline_y)
+
+            elif isinstance(sig['wave'], list):
+                wave_data = sig['wave']
+                n_pts = len(wave_data)
+                step = wave_w / max(n_pts, 1)
+                tw = self.TRANSITION_W
+
+                level_prev = wave_data[0]
+                x_cur = wave_x1
+                y_cur = high_y if level_prev else baseline_y
+                xs.append(x_cur)
+                ys.append(y_cur)
+
+                for wi, val in enumerate(wave_data):
+                    x_next = wave_x1 + (wi + 1) * step
+                    if val == 'X' or val == 'x':
+                        # Don't care: zigzag
+                        n_zigs = 4
+                        for zi in range(n_zigs):
+                            frac = (wi + zi / n_zigs) * step / wave_w
+                            zx = wave_x1 + (wi * step + zi * step / n_zigs)
+                            zy = high_y if zi % 2 == 0 else baseline_y
+                            xs.append(zx)
+                            ys.append(zy)
+                        xs.append(x_next)
+                        ys.append(baseline_y)
+                        level_prev = 0
+                    else:
+                        # Determine if transition
+                        level_cur = int(bool(val))
+                        if level_cur != level_prev:
+                            # Transition slope
+                            y_from = high_y if level_prev else baseline_y
+                            y_to   = high_y if level_cur  else baseline_y
+                            # Diagonal transition
+                            t_mid = wave_x1 + wi * step
+                            t_end = wave_x1 + wi * step + tw
+                            xs += [t_mid, t_end]
+                            ys += [y_from, y_to]
+                        # Hold level
+                        y_hold = high_y if level_cur else baseline_y
+                        xs.append(x_next)
+                        ys.append(y_hold)
+                        level_prev = level_cur
+
+            # Plot waveform
+            ax.plot(xs, ys, color='black', lw=1.2, zorder=10)
+
+            # Data labels
+            for li, lbl in enumerate(sig.get('labels', [])):
+                if li < (len(sig['wave']) if isinstance(sig['wave'], list) else 0):
+                    lx = wave_x1 + (li + 0.5) * (wave_w / max(len(sig['wave']), 1))
+                    ax.text(lx, high_y + 0.06, lbl,
+                            ha='center', va='bottom',
+                            fontsize=self.FS_LABEL - 1, zorder=11)
+
+        # ── Time axis ─────────────────────────────────────────────────────────
+        axis_y = start_y - n_signals * track_h - 0.10
+        ax.plot([wave_x1, wave_x2], [axis_y, axis_y],
+                color='black', lw=0.8, zorder=8)
+        # Ticks
+        for t in range(0, max_t + 1, max(1, max_t // 8)):
+            tx = wave_x1 + t * t_scale
+            ax.plot([tx, tx], [axis_y, axis_y - 0.05],
+                    color='black', lw=0.8, zorder=8)
+            ax.text(tx, axis_y - 0.10, str(t),
+                    ha='center', va='top', fontsize=6, zorder=9)
+
+        # ── Vertical time markers ─────────────────────────────────────────────
+        for m in self._markers:
+            mt = m['t']
+            mx = wave_x1 + mt * t_scale
+            top_y = start_y + 0.10
+            bot_y = axis_y
+            ax.plot([mx, mx], [bot_y, top_y],
+                    color='black', lw=0.8, linestyle='dashed', zorder=12)
+            if m['label']:
+                ax.text(mx, top_y + 0.05, m['label'],
+                        ha='center', va='bottom',
+                        fontsize=self.FS_MARKER, zorder=13,
+                        bbox=dict(facecolor='white', edgecolor='none', pad=1))
+
+        self._draw_frame(ax, fig_num)
+        self._save(fig, ax, output_path, dpi, fig_num)
+        return output_path
+
+    def _draw_frame(self, ax, fig_num: str):
+        import matplotlib.patches as mpatches
+        bnd = mpatches.Rectangle(
+            (self.BND_X1, self.BND_Y1),
+            self.BND_X2 - self.BND_X1, self.BND_Y2 - self.BND_Y1,
+            lw=1.5, edgecolor='black', facecolor='none',
+            linestyle='dashed', zorder=1
+        )
+        ax.add_patch(bnd)
+
+    def _save(self, fig, ax, output_path, dpi, fig_num):
+        import os
+        cx = (self.BND_X1 + self.BND_X2) / 2
+        ax.text(cx, self.BND_Y1 - 0.25, f'FIG. {fig_num}',
+                ha='center', va='center', fontsize=11, zorder=20)
+        import matplotlib.pyplot as plt
+        plt.tight_layout(pad=0)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        plt.savefig(output_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Research 13: PatentDFD — Data Flow Diagram
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PatentDFD:
+    """
+    Data Flow Diagram (Yourdon/DeMarco notation) for patent figures.
+
+    Shapes:
+    - External entity: rectangle
+    - Process: circle (or rounded rectangle)
+    - Data store: open-ended horizontal rectangle (Yourdon style)
+    - Data flow: directional arrows with labels
+
+    Example::
+
+        fig = PatentDFD('FIG. 3')
+        fig.external('USER', '100\\nUser')
+        fig.process('AUTH', '200\\nAuthentication')
+        fig.process('PROC', '300\\nData Processing')
+        fig.store('DB', '400\\nUser Database')
+        fig.flow('USER', 'AUTH', label='credentials')
+        fig.flow('AUTH', 'DB', label='lookup')
+        fig.flow('DB', 'AUTH', label='user record')
+        fig.flow('AUTH', 'PROC', label='token')
+        fig.render('fig3.png')
+    """
+
+    PAGE_W, PAGE_H = 8.5, 11.0
+    BND_X1, BND_Y1 = 0.55, 1.10
+    BND_X2, BND_Y2 = 7.90, 10.15
+
+    FS_ELEM  = 8
+    FS_FLOW  = 7
+
+    PROC_R   = 0.42   # process circle radius
+    EXT_W    = 1.30   # external entity width
+    EXT_H    = 0.55   # external entity height
+    STORE_W  = 1.60   # data store width
+    STORE_H  = 0.40   # data store height
+
+    def __init__(self, fig_label: str = 'FIG. 3'):
+        self.fig_label = fig_label
+        self._elements: list[dict] = []
+        self._flows: list[dict] = []
+        self._elem_map: dict = {}
+        self._positions: dict = {}  # id → (cx, cy)
+
+    def external(self, id: str, text: str,
+                 cx: float = None, cy: float = None) -> 'PatentDFD':
+        """Add an external entity (rectangle)."""
+        e = dict(id=id, type='external', text=text, cx=cx, cy=cy)
+        self._elements.append(e)
+        self._elem_map[id] = e
+        return self
+
+    def process(self, id: str, text: str,
+                cx: float = None, cy: float = None) -> 'PatentDFD':
+        """Add a process (circle/ellipse)."""
+        e = dict(id=id, type='process', text=text, cx=cx, cy=cy)
+        self._elements.append(e)
+        self._elem_map[id] = e
+        return self
+
+    def store(self, id: str, text: str,
+              cx: float = None, cy: float = None) -> 'PatentDFD':
+        """Add a data store (open rectangle)."""
+        e = dict(id=id, type='store', text=text, cx=cx, cy=cy)
+        self._elements.append(e)
+        self._elem_map[id] = e
+        return self
+
+    def flow(self, src: str, dst: str, label: str = '') -> 'PatentDFD':
+        """Add a data flow arrow."""
+        self._flows.append(dict(src=src, dst=dst, label=label))
+        return self
+
+    def _auto_layout(self):
+        """Auto-assign positions if not manually specified."""
+        n = len(self._elements)
+        if n == 0:
+            return
+
+        content_x1 = self.BND_X1 + 0.60
+        content_x2 = self.BND_X2 - 0.60
+        content_y1 = self.BND_Y1 + 0.60
+        content_y2 = self.BND_Y2 - 0.60
+        cw = content_x2 - content_x1
+        ch = content_y2 - content_y1
+
+        # Simple ring layout for elements without positions
+        import math
+        unplaced = [e for e in self._elements if e['cx'] is None]
+        placed   = [e for e in self._elements if e['cx'] is not None]
+
+        for e in placed:
+            self._positions[e['id']] = (e['cx'], e['cy'])
+
+        n_up = len(unplaced)
+        if n_up == 0:
+            return
+
+        # Layout unplaced elements in a circle
+        cx_c = (content_x1 + content_x2) / 2
+        cy_c = (content_y1 + content_y2) / 2
+        radius = min(cw, ch) * 0.35
+
+        if n_up == 1:
+            self._positions[unplaced[0]['id']] = (cx_c, cy_c)
+        elif n_up == 2:
+            self._positions[unplaced[0]['id']] = (cx_c - radius * 0.5, cy_c)
+            self._positions[unplaced[1]['id']] = (cx_c + radius * 0.5, cy_c)
+        else:
+            # Ring layout, starting from top
+            for i, e in enumerate(unplaced):
+                angle = math.pi / 2 - (2 * math.pi * i / n_up)
+                ex = cx_c + radius * math.cos(angle)
+                ey = cy_c + radius * math.sin(angle)
+                self._positions[e['id']] = (ex, ey)
+
+    def _get_edge_point(self, elem_id: str, toward: tuple) -> tuple:
+        """Get the edge point of an element closest to 'toward' (cx, cy)."""
+        import math
+        e = self._elem_map[elem_id]
+        cx, cy = self._positions[elem_id]
+        tx, ty = toward
+
+        dx = tx - cx
+        dy = ty - cy
+        dist = max(0.001, math.sqrt(dx**2 + dy**2))
+        ux, uy = dx / dist, dy / dist  # unit vector toward target
+
+        if e['type'] == 'process':
+            r = self.PROC_R
+            return (cx + ux * r, cy + uy * r)
+        elif e['type'] == 'external':
+            # Rectangle edge
+            w, h = self.EXT_W, self.EXT_H
+            # Clip ray to rectangle edge
+            tx_clip = cx + ux * (w / 2)
+            ty_clip = cy + uy * (h / 2)
+            # Scale: find t such that we hit rect edge
+            if abs(ux) > 0.001:
+                t_x = (w / 2) / abs(ux)
+            else:
+                t_x = float('inf')
+            if abs(uy) > 0.001:
+                t_y = (h / 2) / abs(uy)
+            else:
+                t_y = float('inf')
+            t_edge = min(t_x, t_y)
+            return (cx + ux * t_edge, cy + uy * t_edge)
+        elif e['type'] == 'store':
+            w, h = self.STORE_W, self.STORE_H
+            if abs(ux) > 0.001:
+                t_x = (w / 2) / abs(ux)
+            else:
+                t_x = float('inf')
+            if abs(uy) > 0.001:
+                t_y = (h / 2) / abs(uy)
+            else:
+                t_y = float('inf')
+            t_edge = min(t_x, t_y)
+            return (cx + ux * t_edge, cy + uy * t_edge)
+        else:
+            return (cx + ux * 0.4, cy + uy * 0.4)
+
+    def render(self, output_path: str) -> str:
+        """Render DFD to PNG."""
+        import os
+        import math
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.patches import FancyBboxPatch, Ellipse
+
+        _setup_korean_font()
+        fig_num = self.fig_label.replace('FIG. ', '')
+
+        dpi = 150
+        fig, ax = plt.subplots(figsize=(self.PAGE_W, self.PAGE_H), dpi=dpi)
+        ax.set_xlim(0, self.PAGE_W)
+        ax.set_ylim(0, self.PAGE_H)
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        self._auto_layout()
+
+        # ── Draw elements ─────────────────────────────────────────────────────
+        for e in self._elements:
+            cx, cy = self._positions[e['id']]
+
+            if e['type'] == 'external':
+                w, h = self.EXT_W, self.EXT_H
+                patch = FancyBboxPatch(
+                    (cx - w/2, cy - h/2), w, h,
+                    boxstyle='square,pad=0',
+                    lw=1.3, edgecolor='black', facecolor='white', zorder=10
+                )
+                ax.add_patch(patch)
+                ax.text(cx, cy, e['text'], ha='center', va='center',
+                        fontsize=self.FS_ELEM, zorder=11)
+
+            elif e['type'] == 'process':
+                ell = Ellipse((cx, cy),
+                               width=self.PROC_R * 2 * 1.3,
+                               height=self.PROC_R * 2,
+                               lw=1.3, edgecolor='black', facecolor='white',
+                               zorder=10)
+                ax.add_patch(ell)
+                ax.text(cx, cy, e['text'], ha='center', va='center',
+                        fontsize=self.FS_ELEM, zorder=11)
+
+            elif e['type'] == 'store':
+                w, h = self.STORE_W, self.STORE_H
+                # Yourdon open rectangle: two horizontal lines + one vertical (left)
+                # Top line
+                ax.plot([cx - w/2, cx + w/2], [cy + h/2, cy + h/2],
+                        color='black', lw=1.3, zorder=10)
+                # Bottom line
+                ax.plot([cx - w/2, cx + w/2], [cy - h/2, cy - h/2],
+                        color='black', lw=1.3, zorder=10)
+                # Left vertical
+                ax.plot([cx - w/2, cx - w/2], [cy - h/2, cy + h/2],
+                        color='black', lw=1.3, zorder=10)
+                # (right side open)
+                ax.text(cx, cy, e['text'], ha='center', va='center',
+                        fontsize=self.FS_ELEM, zorder=11)
+
+        # ── Draw flows ────────────────────────────────────────────────────────
+        for fl in self._flows:
+            src_id = fl['src']
+            dst_id = fl['dst']
+            if src_id not in self._positions or dst_id not in self._positions:
+                continue
+            scx, scy = self._positions[src_id]
+            dcx, dcy = self._positions[dst_id]
+
+            p0 = self._get_edge_point(src_id, (dcx, dcy))
+            p1 = self._get_edge_point(dst_id, (scx, scy))
+
+            ax.annotate('', xy=p1, xytext=p0,
+                         arrowprops=dict(
+                             arrowstyle='->', color='black', lw=1.1,
+                             mutation_scale=11,
+                         ), zorder=12)
+            if fl['label']:
+                mx = (p0[0] + p1[0]) / 2
+                my = (p0[1] + p1[1]) / 2
+                dx = p1[0] - p0[0]
+                dy = p1[1] - p0[1]
+                length = max(0.001, math.sqrt(dx**2 + dy**2))
+                perp_x = -dy / length * 0.12
+                perp_y =  dx / length * 0.12
+                ax.text(mx + perp_x, my + perp_y, fl['label'],
+                        ha='center', va='center',
+                        fontsize=self.FS_FLOW, zorder=13,
+                        bbox=dict(facecolor='white', edgecolor='none', pad=1))
+
+        # ── Boundary + FIG. label ─────────────────────────────────────────────
+        bnd = mpatches.Rectangle(
+            (self.BND_X1, self.BND_Y1),
+            self.BND_X2 - self.BND_X1, self.BND_Y2 - self.BND_Y1,
+            lw=1.5, edgecolor='black', facecolor='none',
+            linestyle='dashed', zorder=1
+        )
+        ax.add_patch(bnd)
+        cx_bnd = (self.BND_X1 + self.BND_X2) / 2
+        ax.text(cx_bnd, self.BND_Y1 - 0.25, f'FIG. {fig_num}',
+                ha='center', va='center', fontsize=11, zorder=20)
+
+        import matplotlib.pyplot as _plt
+        _plt.tight_layout(pad=0)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        _plt.savefig(output_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+        _plt.close(fig)
+        return output_path
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Research 13: PatentER — Entity-Relationship Diagram
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class PatentER:
+    """
+    Entity-Relationship diagram for database/data model patent figures.
+
+    Shapes:
+    - Entity: rectangle with attribute list
+    - Relationship: diamond
+    - Cardinality: 1, N, M notation
+    - PK attributes: underlined
+
+    Example::
+
+        fig = PatentER('FIG. 6')
+        fig.entity('USER',    '100\\nUser',
+                   attrs=['user_id (PK)', 'name', 'email'])
+        fig.entity('ORDER',   '200\\nOrder',
+                   attrs=['order_id (PK)', 'date', 'total'])
+        fig.entity('PRODUCT', '300\\nProduct',
+                   attrs=['product_id (PK)', 'name', 'price'])
+        fig.relationship('USER',  'ORDER',   '1', 'N', label='places')
+        fig.relationship('ORDER', 'PRODUCT', 'N', 'M', label='contains')
+        fig.render('fig6.png')
+    """
+
+    PAGE_W, PAGE_H = 8.5, 11.0
+    BND_X1, BND_Y1 = 0.55, 1.10
+    BND_X2, BND_Y2 = 7.90, 10.15
+
+    FS_ENTITY = 8
+    FS_ATTR   = 7
+    FS_REL    = 7
+    FS_CARD   = 8
+
+    ENTITY_W  = 1.60
+    ATTR_H    = 0.22  # height per attribute row
+    ENTITY_TITLE_H = 0.36
+
+    REL_W = 0.80   # relationship diamond width
+    REL_H = 0.40   # relationship diamond height
+
+    def __init__(self, fig_label: str = 'FIG. 6'):
+        self.fig_label = fig_label
+        self._entities: list[dict] = []
+        self._relationships: list[dict] = []
+        self._entity_map: dict = {}
+        self._positions: dict = {}  # id → (cx, cy)
+
+    def entity(self, id: str, text: str, attrs: list = None,
+               cx: float = None, cy: float = None) -> 'PatentER':
+        """Add an entity.
+
+        Args:
+            id:    Unique entity identifier.
+            text:  Title text (ref\\nName format).
+            attrs: List of attribute strings. PK attributes detected by '(PK)'.
+            cx/cy: Optional manual position.
+        """
+        e = dict(id=id, text=text, attrs=attrs or [], cx=cx, cy=cy)
+        self._entities.append(e)
+        self._entity_map[id] = e
+        return self
+
+    def relationship(self, entity1: str, entity2: str,
+                     card1: str, card2: str,
+                     label: str = '',
+                     cx: float = None, cy: float = None) -> 'PatentER':
+        """Add a relationship between two entities.
+
+        Args:
+            entity1/entity2: Entity ids.
+            card1/card2:     Cardinality ('1', 'N', 'M').
+            label:           Relationship name.
+            cx/cy:           Optional manual position for diamond.
+        """
+        self._relationships.append(dict(
+            e1=entity1, e2=entity2,
+            card1=card1, card2=card2,
+            label=label, cx=cx, cy=cy,
+        ))
+        return self
+
+    def _entity_height(self, entity_id: str) -> float:
+        """Total height of entity box including attributes."""
+        e = self._entity_map[entity_id]
+        return self.ENTITY_TITLE_H + len(e['attrs']) * self.ATTR_H
+
+    def _auto_layout(self):
+        """Auto-assign positions if not given."""
+        import math
+        n = len(self._entities)
+        if n == 0:
+            return
+
+        content_x1 = self.BND_X1 + 0.70
+        content_x2 = self.BND_X2 - 0.70
+        content_y1 = self.BND_Y1 + 0.80
+        content_y2 = self.BND_Y2 - 0.80
+        cw = content_x2 - content_x1
+
+        # Place entities in a horizontal row
+        spacing = cw / max(n, 1)
+        for i, e in enumerate(self._entities):
+            if e['cx'] is not None:
+                self._positions[e['id']] = (e['cx'], e['cy'])
+                continue
+            cx = content_x1 + (i + 0.5) * spacing
+            cy = (content_y1 + content_y2) / 2
+            self._positions[e['id']] = (cx, cy)
+
+        # Place relationship diamonds at midpoints (if not specified)
+        for rel in self._relationships:
+            if rel['cx'] is not None:
+                continue
+            if rel['e1'] in self._positions and rel['e2'] in self._positions:
+                p1 = self._positions[rel['e1']]
+                p2 = self._positions[rel['e2']]
+                rel['_cx'] = (p1[0] + p2[0]) / 2
+                rel['_cy'] = (p1[1] + p2[1]) / 2
+            else:
+                rel['_cx'] = (content_x1 + content_x2) / 2
+                rel['_cy'] = (content_y1 + content_y2) / 2
+
+    def render(self, output_path: str) -> str:
+        """Render ER diagram to PNG."""
+        import os
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        from matplotlib.patches import FancyBboxPatch, Polygon
+
+        _setup_korean_font()
+        fig_num = self.fig_label.replace('FIG. ', '')
+
+        dpi = 150
+        fig, ax = plt.subplots(figsize=(self.PAGE_W, self.PAGE_H), dpi=dpi)
+        ax.set_xlim(0, self.PAGE_W)
+        ax.set_ylim(0, self.PAGE_H)
+        ax.set_aspect('equal')
+        ax.axis('off')
+
+        self._auto_layout()
+
+        # ── Draw entities ─────────────────────────────────────────────────────
+        for e in self._entities:
+            cx, cy = self._positions[e['id']]
+            w = self.ENTITY_W
+            total_h = self._entity_height(e['id'])
+            x1 = cx - w / 2
+            y_top = cy + total_h / 2
+            y1 = y_top - total_h
+
+            # Outer border
+            patch = FancyBboxPatch(
+                (x1, y1), w, total_h,
+                boxstyle='square,pad=0',
+                lw=1.5, edgecolor='black', facecolor='white', zorder=10
+            )
+            ax.add_patch(patch)
+
+            # Title row
+            title_y2 = y_top
+            title_y1 = y_top - self.ENTITY_TITLE_H
+            # Divider line
+            ax.plot([x1, x1 + w], [title_y1, title_y1],
+                    color='black', lw=1.0, zorder=11)
+            # Title text
+            ax.text(cx, (title_y1 + title_y2) / 2, e['text'],
+                    ha='center', va='center',
+                    fontsize=self.FS_ENTITY, zorder=12)
+
+            # Attribute rows
+            for ai, attr in enumerate(e['attrs']):
+                row_y2 = title_y1 - ai * self.ATTR_H
+                row_y1 = row_y2 - self.ATTR_H
+                row_cy = (row_y1 + row_y2) / 2
+                is_pk = '(PK)' in attr or '(pk)' in attr
+                ax.text(cx, row_cy, attr,
+                        ha='center', va='center',
+                        fontsize=self.FS_ATTR, zorder=12,
+                        # PK: underline via textprops
+                        **({'textprops': {'fontweight': 'normal'}} if not is_pk else {}))
+                if is_pk:
+                    # Draw underline manually
+                    txt_w = w * 0.65
+                    ax.plot([cx - txt_w/2, cx + txt_w/2],
+                            [row_y1 + 0.03, row_y1 + 0.03],
+                            color='black', lw=0.8, zorder=13)
+                if ai < len(e['attrs']) - 1:
+                    ax.plot([x1, x1 + w], [row_y1, row_y1],
+                            color='black', lw=0.5, linestyle='dashed', zorder=11)
+
+        # ── Draw relationships ────────────────────────────────────────────────
+        for rel in self._relationships:
+            if '_cx' not in rel:
+                rel['_cx'] = rel.get('cx') or 4.2
+                rel['_cy'] = rel.get('cy') or 5.5
+            rcx = rel['_cx']
+            rcy = rel['_cy']
+
+            # Diamond shape
+            dw = self.REL_W
+            dh = self.REL_H
+            pts = [
+                (rcx, rcy + dh/2),       # top
+                (rcx + dw/2, rcy),        # right
+                (rcx, rcy - dh/2),        # bottom
+                (rcx - dw/2, rcy),        # left
+            ]
+            diamond = Polygon(pts, closed=True,
+                               lw=1.3, edgecolor='black', facecolor='white',
+                               zorder=15)
+            ax.add_patch(diamond)
+
+            if rel['label']:
+                ax.text(rcx, rcy, rel['label'],
+                        ha='center', va='center',
+                        fontsize=self.FS_REL, zorder=16)
+
+            # Connecting lines + cardinality labels
+            for eid, card in [(rel['e1'], rel['card1']),
+                               (rel['e2'], rel['card2'])]:
+                if eid not in self._positions:
+                    continue
+                ecx, ecy = self._positions[eid]
+                e_obj = self._entity_map[eid]
+                e_h = self._entity_height(eid)
+
+                # Direction: entity → diamond
+                ddx = rcx - ecx
+                ddy = rcy - ecy
+                import math
+                dist = max(0.001, math.sqrt(ddx**2 + ddy**2))
+                ux, uy = ddx/dist, ddy/dist
+
+                # Entity edge point
+                ew = self.ENTITY_W
+                if abs(ux) > 0.001:
+                    t_x = (ew / 2) / abs(ux)
+                else:
+                    t_x = float('inf')
+                if abs(uy) > 0.001:
+                    t_y = (e_h / 2) / abs(uy)
+                else:
+                    t_y = float('inf')
+                t_ent = min(t_x, t_y)
+                p_ent = (ecx + ux * t_ent, ecy + uy * t_ent)
+
+                # Diamond edge point
+                p_dia = (rcx - ux * dw/2, rcy - uy * dh/2)
+                # Simple: use diamond center - offset along direction
+                # More accurate: ray-diamond intersection
+                # Use: max(|ux|/dw*2, |uy|/dh*2) style
+                if abs(ux) > 0 or abs(uy) > 0:
+                    # Parametric: |ux|/(dw/2) + |uy|/(dh/2)
+                    t_dia = 1.0 / (abs(ux)/(dw/2) + abs(uy)/(dh/2) + 0.001)
+                    p_dia = (rcx - ux * t_dia, rcy - uy * t_dia)
+
+                # Line
+                ax.plot([p_ent[0], p_dia[0]], [p_ent[1], p_dia[1]],
+                        color='black', lw=1.0, zorder=12)
+
+                # Cardinality label near entity side
+                lx = p_ent[0] + ux * 0.20
+                ly = p_ent[1] + uy * 0.20
+                ax.text(lx, ly, card,
+                        ha='center', va='center',
+                        fontsize=self.FS_CARD, fontweight='bold', zorder=16,
+                        bbox=dict(facecolor='white', edgecolor='none', pad=1))
+
+        # ── Boundary + FIG. label ─────────────────────────────────────────────
+        bnd = mpatches.Rectangle(
+            (self.BND_X1, self.BND_Y1),
+            self.BND_X2 - self.BND_X1, self.BND_Y2 - self.BND_Y1,
+            lw=1.5, edgecolor='black', facecolor='none',
+            linestyle='dashed', zorder=1
+        )
+        ax.add_patch(bnd)
+        cx_b = (self.BND_X1 + self.BND_X2) / 2
+        ax.text(cx_b, self.BND_Y1 - 0.25, f'FIG. {fig_num}',
+                ha='center', va='center', fontsize=11, zorder=20)
+
+        import matplotlib.pyplot as _plt
+        _plt.tight_layout(pad=0)
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        _plt.savefig(output_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+        _plt.close(fig)
+        return output_path
+

@@ -53,6 +53,15 @@ Phase 8 additions (Research 8):
   - render() auto-split: auto_split=True (default) triggers render_multi()
     when node count > max_nodes_per_page (default 14).
   - preset(): style presets — 'uspto', 'draft', 'presentation'.
+
+Phase 9 additions (Research 9):
+  - from_spec() accuracy: Korean decision keywords (여부 판단, 확인, 검증),
+    "후 종료" implicit END branches, number-only paren skip, improved shape detection.
+  - bus(): horizontal bus topology with multiple node connections.
+  - edge() label_back= param: separate labels for bidir arrow each direction.
+  - PatentSequence: sequence diagram support (actors, messages, return arrows).
+  - Error recovery: empty text warning, duplicate ID warning, cycle detection report,
+    long text auto-wrap (>200 chars), orphan validation with shape awareness.
 """
 
 import sys, os
@@ -134,7 +143,7 @@ class FigNode:
 
 class FigEdge:
     """An edge (arrow) between two nodes."""
-    __slots__ = ('src_id', 'dst_id', 'label', 'is_back', 'bidir')
+    __slots__ = ('src_id', 'dst_id', 'label', 'is_back', 'bidir', 'label_back')
 
     def __init__(self, src_id: str, dst_id: str, label: str = '', bidir: bool = False):
         self.src_id = src_id
@@ -142,6 +151,7 @@ class FigEdge:
         self.label = label
         self.is_back = False    # True if this is a loop-back edge
         self.bidir = bidir      # True if bidirectional arrow
+        self.label_back = ''    # label for the reverse direction of bidir arrows
 
 
 class FigContainer:
@@ -203,6 +213,8 @@ class PatentFigure:
         self._notes: list[dict] = []   # {node_id, text}
         # Phase 6: max text width for auto-wrap (inches, None = disabled)
         self.max_text_width: float = None
+        # Phase 9: bus connections
+        self._buses: list[dict] = []
 
     def style(self, **kwargs) -> 'PatentFigure':
         """
@@ -293,12 +305,24 @@ class PatentFigure:
     def node(self, id: str, text: str = '', shape: str = 'process') -> 'PatentFigure':
         """Add a node. shape: process | start | end | diamond | oval | cylinder
         
-        If text is empty, uses id as text.
-        If auto-numbering is active (see auto_number()), the reference number
-        is prepended automatically to text.
+        Phase 9 error recovery:
+        - Empty text → warning, uses id as fallback text.
+        - Duplicate ID → warning, overwrites previous node.
+        - Text > 200 chars → auto-wrap + warning.
         """
+        import warnings as _w
+        # Empty text warning
         if not text:
+            _w.warn(f"PatentFigure: node '{id}' has empty text — using id as fallback")
             text = id
+        # Duplicate ID warning
+        if id in self._nodes:
+            _w.warn(f"PatentFigure: duplicate node id '{id}' — overwriting previous definition")
+            self._order.remove(id)
+        # Long text auto-wrap (>200 chars)
+        if len(text) > 200:
+            _w.warn(f"PatentFigure: node '{id}' text exceeds 200 chars — auto-wrapping")
+            text = self._wrap_text(text, max_chars_per_line=20)
         self._nodes[id] = FigNode(id, text, shape)
         self._order.append(id)
         return self
@@ -507,6 +531,44 @@ class PatentFigure:
                 if nid not in self._nodes:
                     warnings.append(f"node_group references undefined node: '{nid}'")
 
+        # Phase 9: edge-less non-START/END nodes (orphans with shape context)
+        out_edges = {e.src_id for e in self._edges}
+        in_edges  = {e.dst_id for e in self._edges}
+        for nid, nd in self._nodes.items():
+            if nd.shape in ('start', 'end'):
+                continue
+            if nid not in out_edges and nid not in in_edges:
+                pass  # already caught by orphan check
+            elif nid not in out_edges and nd.shape not in ('end',):
+                warnings.append(f"Node '{nid}' (shape={nd.shape}) has no outgoing edge — possibly missing connection or should be shape='end'")
+
+        # Phase 9: cycle detection (simple DFS)
+        adj_fwd = {}
+        for e in self._edges:
+            if e.src_id in self._nodes and e.dst_id in self._nodes:
+                adj_fwd.setdefault(e.src_id, []).append(e.dst_id)
+
+        visited_cy, in_stack = set(), set()
+        cycles_found = []
+
+        def _dfs_cycle(u, path):
+            visited_cy.add(u)
+            in_stack.add(u)
+            for v in adj_fwd.get(u, []):
+                if v not in visited_cy:
+                    _dfs_cycle(v, path + [v])
+                elif v in in_stack:
+                    # Found a cycle; report it
+                    cycle_start = path.index(v) if v in path else 0
+                    cycles_found.append(' → '.join(path[cycle_start:] + [v]))
+
+        for nid in self._order:
+            if nid not in visited_cy:
+                _dfs_cycle(nid, [nid])
+
+        for c in cycles_found[:3]:  # report up to 3 cycles
+            warnings.append(f"Cycle detected (will be treated as back-edge): {c}")
+
         return warnings
 
     # ── Phase 6: Text Auto-Wrap ───────────────────────────────────────────────
@@ -688,6 +750,26 @@ class PatentFigure:
             if m:
                 alpha_groups[m.group(1)].append(nid)
 
+        # ── Phase 9: Detect decision keywords in text ─────────────────────────
+        DECISION_KW = [
+            # Korean decision patterns
+            '여부 판단', '여부를 판단', '여부확인', '여부 확인',
+            '판단', '확인', '검증', '검사', '비교',
+            # English decision patterns
+            'check', 'verify', 'validate', 'decide', 'determine',
+            'is ', 'are ', 'has ', 'have ',
+        ]
+
+        def _has_decision_kw(text_: str) -> bool:
+            tl = text_.lower()
+            return any(kw in tl for kw in DECISION_KW)
+
+        # ── Phase 9: Detect implicit END nodes ("후 종료" pattern) ────────────
+        IMPLICIT_END_KW = ['후 종료', '로 종료', '하고 종료', '종료']
+
+        def _has_implicit_end(text_: str) -> bool:
+            return any(kw in text_ for kw in IMPLICIT_END_KW)
+
         # ── Assign shapes ─────────────────────────────────────────────────────
         redirect_srcs = {nid for nid, _, reds in node_defs if reds}
 
@@ -700,14 +782,51 @@ class PatentFigure:
                 shape = 'diamond'  # multi-branch decision
             elif nid in redirect_srcs:
                 shape = 'diamond'  # has some redirect = decision
+            elif _has_decision_kw(text):
+                shape = 'diamond'  # Phase 9: keyword heuristic
             else:
                 shape = 'process'
-            fig.node(nid, f'{nid}\n{text}', shape=shape)
+            # Phase 9: use numeric-only ref number in display text so USPTO
+            # validator (which expects pure digits on first line) is satisfied.
+            # Sxxx → strip 'S'; Sxxxα → use numeric part only (alpha is in node text)
+            import re as _re
+            num_m = _re.match(r'^S(\d+)([a-z]?)$', nid)
+            if num_m:
+                # Use only digits for the reference number line (USPTO compliance)
+                ref_num = num_m.group(1)
+                display_text = f'{ref_num}\n{text}'
+            else:
+                display_text = f'{nid}\n{text}'
+            fig.node(nid, display_text, shape=shape)
 
         # ── Apply parallel node groups ─────────────────────────────────────────
         for base_id, group_ids in alpha_groups.items():
             if len(group_ids) > 1:
                 fig.node_group(group_ids)
+
+        # ── Phase 9: Build implicit END nodes for "후 종료" branches ──────────
+        # If a node has text like "실패 시 거부 후 종료", we add a synthetic END node
+        # and create an edge to it.
+        _extra_end_nodes = {}  # nid → synthetic end node id
+
+        for i, (nid, text, redirects) in enumerate(node_defs):
+            if _has_implicit_end(text):
+                # Create synthetic END node (if node itself is diamond or process)
+                # This node terminates the branch
+                synth_id = f'_end_{nid}'
+                if synth_id not in all_ids_set:
+                    _extra_end_nodes[nid] = synth_id
+
+        # Add synthetic END nodes to fig (as 'end' shape)
+        # Derive numeric ref from source node number + 50 for USPTO compliance
+        import re as _re2
+        for src_id, synth_id in _extra_end_nodes.items():
+            src_m = _re2.match(r'^S(\d+)', src_id)
+            if src_m:
+                end_ref = str(int(src_m.group(1)) + 50)
+            else:
+                end_ref = '999'
+            fig.node(synth_id, f'{end_ref}\nEnd', shape='end')
 
         # ── Build edges ────────────────────────────────────────────────────────
         # Find the "next" sequential node for each, skipping parallel members
@@ -717,6 +836,8 @@ class PatentFigure:
             next_id = None
             if i + 1 < len(node_defs):
                 next_id = node_defs[i + 1][0]
+
+            has_implicit_end_branch = nid in _extra_end_nodes
 
             if redirects:
                 # Has explicit redirects → draw edges per redirect
@@ -733,21 +854,66 @@ class PatentFigure:
                     else:
                         # Target doesn't exist as a node — treat as end label
                         pass
+                # Add implicit end branch if detected
+                if has_implicit_end_branch and _extra_end_nodes[nid] not in redirect_targets:
+                    fig.edge(nid, _extra_end_nodes[nid], label='N')
             else:
-                # Sequential: connect to next
-                if next_id:
-                    fig.edge(nid, next_id)
+                # Phase 9: If text contains "후 종료" and no explicit redirect,
+                # treat this node as terminal (connect to synthetic END) AND
+                # still connect to sequential next (it's an alternative path)
+                if has_implicit_end_branch:
+                    # This node has an implicit exit path to END
+                    fig.edge(nid, _extra_end_nodes[nid], label='N')
+                    # Also continue sequential
+                    if next_id:
+                        fig.edge(nid, next_id, label='Y')
+                else:
+                    # Sequential: connect to next
+                    if next_id:
+                        fig.edge(nid, next_id)
 
         return fig
 
-    def edge(self, src: str, dst: str, label: str = '', bidir: bool = False) -> 'PatentFigure':
+    def edge(self, src: str, dst: str, label: str = '', bidir: bool = False,
+             label_back: str = '') -> 'PatentFigure':
         """Add a directed edge (arrow) from src to dst.
         bidir=True: bidirectional arrow (both arrowheads).
+        label_back: label for the reverse direction of bidir arrows.
         
         Note: Edges referencing non-existent node IDs are silently skipped
         during rendering (no crash). A warning is printed at render time.
         """
-        self._edges.append(FigEdge(src, dst, label, bidir=bidir))
+        e = FigEdge(src, dst, label, bidir=bidir)
+        e.label_back = label_back
+        self._edges.append(e)
+        return self
+
+    def bus(self, bus_id: str, node_ids: list, label: str = '',
+            orientation: str = 'H') -> 'PatentFigure':
+        """
+        Add a bus connection: a horizontal (or vertical) bar connecting
+        multiple nodes. Each node connects to the bus with a short stem.
+
+        The bus itself is rendered as a thick horizontal line with stubs
+        to each connected node.
+
+        Args:
+            bus_id:      Unique ID for the bus bar itself.
+            node_ids:    List of node IDs connected to the bus.
+            label:       Optional label for the bus bar.
+            orientation: 'H' = horizontal bus (default), 'V' = vertical bus.
+
+        Example::
+
+            fig.bus('DATA_BUS', ['CPU', 'Memory', 'GPU', 'Storage'],
+                    label='810\nData Bus')
+        """
+        self._buses.append({
+            'id': bus_id,
+            'node_ids': list(node_ids),
+            'label': label,
+            'orientation': orientation,
+        })
         return self
 
     def container(self, id: str, node_ids: list, label: str = '',
@@ -1560,10 +1726,23 @@ class PatentFigure:
                     if rank_diff == 0:
                         mid_x = (sb.cx + db.cx) / 2
                         mid_y = (sb.cy + db.cy) / 2
-                        d.label(mid_x + 0.05, mid_y + 0.08, e.label, ha='left', fs=_label_fs)
+                        # bidir: shift forward label up to avoid overlap with label_back
+                        _offset_y = 0.14 if (e.bidir and e.label_back) else 0.08
+                        d.label(mid_x + 0.05, mid_y + _offset_y, e.label, ha='left', fs=_label_fs)
                     else:
                         mid_x = (sb.right + db.left) / 2
-                        d.label(mid_x, (sb.cy + db.cy) / 2 + 0.08, e.label, ha='center', fs=_label_fs)
+                        _offset_y = 0.14 if (e.bidir and e.label_back) else 0.08
+                        d.label(mid_x, (sb.cy + db.cy) / 2 + _offset_y, e.label, ha='center', fs=_label_fs)
+                # Phase 9: label_back for bidir LR edges
+                # Place forward label above midpoint, return label below midpoint
+                if e.label_back and e.bidir:
+                    if rank_diff == 0:
+                        mid_x = (sb.cx + db.cx) / 2
+                        mid_y = (sb.cy + db.cy) / 2
+                        d.label(mid_x + 0.05, mid_y - 0.18, e.label_back, ha='left', fs=_label_fs)
+                    else:
+                        mid_x = (sb.right + db.left) / 2
+                        d.label(mid_x, (sb.cy + db.cy) / 2 - 0.18, e.label_back, ha='center', fs=_label_fs)
                 continue
 
             # ── Phase 8: Diamond exact-vertex helpers ─────────────────────────
@@ -1866,6 +2045,63 @@ class PatentFigure:
                       fontfamily='DejaVu Sans', zorder=16,
                       wrap=True)
 
+        # Phase 9: Draw bus connections
+        for bus_def in self._buses:
+            bus_node_ids = bus_def['node_ids']
+            bus_label = bus_def.get('label', '')
+            bus_orient = bus_def.get('orientation', 'H')
+
+            # Get boxes for all connected nodes
+            bus_boxes = [self._nodes[nid].box_ref
+                         for nid in bus_node_ids
+                         if nid in self._nodes and self._nodes[nid].box_ref]
+            if not bus_boxes:
+                continue
+
+            import matplotlib.patches as _buspatch
+            if bus_orient == 'H':
+                # Horizontal bus: draw a thick horizontal bar at median bottom of nodes
+                bus_y = min(b.bot for b in bus_boxes) - 0.35
+                bus_x1 = min(b.cx for b in bus_boxes) - 0.10
+                bus_x2 = max(b.cx for b in bus_boxes) + 0.10
+                # Clamp to boundary
+                bus_x1 = max(bus_x1, self.BND_X1 + 0.20)
+                bus_x2 = min(bus_x2, self.BND_X2 - 0.20)
+                bus_y = max(bus_y, self.BND_Y1 + 0.20)
+                # Draw thick bus bar
+                d.ax.plot([bus_x1, bus_x2], [bus_y, bus_y],
+                          color='black', lw=3.0, solid_capstyle='butt', zorder=10)
+                # End caps
+                cap_h = 0.08
+                d.ax.plot([bus_x1, bus_x1], [bus_y - cap_h, bus_y + cap_h],
+                          color='black', lw=2.0, zorder=10)
+                d.ax.plot([bus_x2, bus_x2], [bus_y - cap_h, bus_y + cap_h],
+                          color='black', lw=2.0, zorder=10)
+                # Stubs from each node bottom to bus bar
+                for b in bus_boxes:
+                    d.ax.plot([b.cx, b.cx], [b.bot, bus_y],
+                              color='black', lw=1.3, zorder=9)
+                # Bus label (left of bus bar)
+                if bus_label:
+                    d.ax.text(bus_x1 - 0.05, bus_y, bus_label,
+                              ha='right', va='center', fontsize=8, zorder=11,
+                              bbox=dict(facecolor='white', edgecolor='none', pad=1))
+            else:
+                # Vertical bus
+                bus_x = max(b.right for b in bus_boxes) + 0.35
+                bus_y1 = min(b.cy for b in bus_boxes) - 0.10
+                bus_y2 = max(b.cy for b in bus_boxes) + 0.10
+                bus_x = min(bus_x, self.BND_X2 - 0.20)
+                d.ax.plot([bus_x, bus_x], [bus_y1, bus_y2],
+                          color='black', lw=3.0, solid_capstyle='butt', zorder=10)
+                for b in bus_boxes:
+                    d.ax.plot([b.right, bus_x], [b.cy, b.cy],
+                              color='black', lw=1.3, zorder=9)
+                if bus_label:
+                    d.ax.text(bus_x + 0.05, (bus_y1 + bus_y2) / 2, bus_label,
+                              ha='left', va='center', fontsize=8, zorder=11,
+                              bbox=dict(facecolor='white', edgecolor='none', pad=1))
+
         # Boundary + label
         d.boundary(self.BND_X1, self.BND_Y1, self.BND_X2, self.BND_Y2)
         d.fig_label()
@@ -1875,3 +2111,207 @@ class PatentFigure:
         self._restore_style(_style_originals)
 
         return d
+
+
+# ── Phase 9: Sequence Diagram Support ────────────────────────────────────────
+
+class PatentSequence:
+    """
+    Minimal sequence diagram for patent drawings.
+
+    Renders actors as vertical lifelines with horizontal message arrows.
+    Return messages are shown as dashed arrows.
+
+    Example::
+
+        fig = PatentSequence('FIG. 3')
+        fig.actor('User',   'user')
+        fig.actor('Server', 'server')
+        fig.actor('DB',     'db')
+
+        fig.message('user',   'server', 'login(id, pw)')
+        fig.message('server', 'db',     'query(id)')
+        fig.message('db',     'server', 'result',    return_msg=True)
+        fig.message('server', 'user',   'token',     return_msg=True)
+        fig.render('fig3_seq.png')
+
+    Supported features:
+    - Vertical actor lifelines (dashed)
+    - Actor head boxes at top
+    - Forward messages: solid arrow →
+    - Return messages: dashed arrow <--
+    - Automatic vertical spacing
+    - USPTO boundary + FIG. label
+    """
+
+    # Page constants
+    PAGE_W, PAGE_H = 8.5, 11.0
+    BND_X1, BND_Y1 = 0.55, 1.10
+    BND_X2, BND_Y2 = 7.90, 10.15
+
+    # Layout
+    ACTOR_BOX_H  = 0.50   # actor head box height
+    ACTOR_BOX_W  = 1.40   # actor head box width
+    MSG_SPACING  = 0.60   # vertical spacing between messages
+    LIFELINE_TOP_PAD = 0.15  # gap below actor box to lifeline start
+    FS_ACTOR = 9
+    FS_MSG   = 8
+
+    def __init__(self, fig_label: str = 'FIG. 3'):
+        self.fig_label = fig_label
+        self._actors: list[dict] = []   # [{id, label}]
+        self._messages: list[dict] = [] # [{src, dst, label, return_msg}]
+
+    def actor(self, label: str, id: str) -> 'PatentSequence':
+        """Add an actor (participant) to the sequence diagram.
+
+        Args:
+            label: Display name for the actor (shown in head box).
+            id:    Unique identifier used in message() calls.
+        """
+        self._actors.append({'id': id, 'label': label})
+        return self
+
+    def message(self, src: str, dst: str, label: str = '',
+                return_msg: bool = False) -> 'PatentSequence':
+        """Add a message between two actors.
+
+        Args:
+            src:        Source actor id.
+            dst:        Destination actor id.
+            label:      Message label (e.g. function call or data).
+            return_msg: If True, draw as dashed return arrow.
+        """
+        self._messages.append({
+            'src': src, 'dst': dst,
+            'label': label,
+            'return_msg': return_msg,
+        })
+        return self
+
+    def render(self, output_path: str) -> str:
+        """Render the sequence diagram to a PNG file."""
+        import sys, os
+        sys.path.insert(0, os.path.dirname(__file__))
+        from patent_drawing_lib import Drawing
+        import matplotlib.patches as mpatches
+        import matplotlib
+
+        fig_num = self.fig_label.replace('FIG. ', '')
+        d = Drawing(output_path, fig_num=fig_num)
+
+        n_actors = len(self._actors)
+        n_msgs   = len(self._messages)
+        if n_actors == 0:
+            d.boundary(self.BND_X1, self.BND_Y1, self.BND_X2, self.BND_Y2)
+            d.fig_label()
+            d.save()
+            return output_path
+
+        # ── Layout ────────────────────────────────────────────────────────────
+        content_w = self.BND_X2 - self.BND_X1 - 0.80
+        content_x1 = self.BND_X1 + 0.40
+
+        # Distribute actors evenly across content width
+        actor_spacing = content_w / max(n_actors - 1, 1) if n_actors > 1 else 0
+        actor_xs = []
+        for i in range(n_actors):
+            if n_actors == 1:
+                actor_xs.append(content_x1 + content_w / 2)
+            else:
+                actor_xs.append(content_x1 + i * actor_spacing)
+
+        # Cap actor spacing so boxes don't overlap
+        max_actor_spacing = max(self.ACTOR_BOX_W + 0.60, actor_spacing)
+        # Recompute if spacing too tight
+        if actor_spacing < self.ACTOR_BOX_W + 0.30 and n_actors > 1:
+            actor_spacing = min(max_actor_spacing,
+                                content_w / (n_actors - 1))
+            actor_xs = [content_x1 + i * actor_spacing for i in range(n_actors)]
+
+        actor_top_y = self.BND_Y2 - 0.30
+        actor_bot_y = actor_top_y - self.ACTOR_BOX_H
+
+        lifeline_start_y = actor_bot_y - self.LIFELINE_TOP_PAD
+
+        # Vertical extent for messages
+        total_msg_h = (n_msgs + 0.5) * self.MSG_SPACING
+        lifeline_end_y = max(
+            lifeline_start_y - total_msg_h,
+            self.BND_Y1 + 0.30
+        )
+
+        # Build actor id → x lookup
+        actor_x_map = {a['id']: actor_xs[i] for i, a in enumerate(self._actors)}
+
+        # ── Draw lifelines ────────────────────────────────────────────────────
+        for ax_x in actor_xs:
+            d.ax.plot([ax_x, ax_x], [lifeline_start_y, lifeline_end_y],
+                      color='black', lw=0.9, linestyle='dashed', zorder=5)
+
+        # ── Draw actor boxes ──────────────────────────────────────────────────
+        for i, actor in enumerate(self._actors):
+            ax_x = actor_xs[i]
+            bx = ax_x - self.ACTOR_BOX_W / 2
+            by = actor_bot_y
+            # Box
+            d.ax.add_patch(mpatches.FancyBboxPatch(
+                (bx, by), self.ACTOR_BOX_W, self.ACTOR_BOX_H,
+                boxstyle='square,pad=0',
+                linewidth=1.2, edgecolor='black', facecolor='white', zorder=10
+            ))
+            # Label
+            d.ax.text(ax_x, by + self.ACTOR_BOX_H / 2, actor['label'],
+                      ha='center', va='center',
+                      fontsize=self.FS_ACTOR, zorder=11)
+
+        # ── Draw messages ─────────────────────────────────────────────────────
+        for mi, msg in enumerate(self._messages):
+            src_x = actor_x_map.get(msg['src'])
+            dst_x = actor_x_map.get(msg['dst'])
+            if src_x is None or dst_x is None:
+                continue
+
+            msg_y = lifeline_start_y - (mi + 1) * self.MSG_SPACING
+            if msg_y < lifeline_end_y:
+                msg_y = lifeline_end_y + 0.10
+
+            ls = 'dashed' if msg['return_msg'] else 'solid'
+            color = 'black'
+            lw = 1.0
+
+            # Arrow
+            dx = dst_x - src_x
+            if abs(dx) < 0.01:
+                # Self-message: small loop
+                loop_x = src_x + 0.30
+                d.ax.annotate('', xy=(dst_x, msg_y - 0.12), xytext=(src_x, msg_y),
+                               arrowprops=dict(
+                                   arrowstyle='->' if not msg['return_msg'] else '<-',
+                                   color=color, lw=lw,
+                                   connectionstyle='arc3,rad=-0.3'
+                               ), zorder=12)
+            else:
+                import matplotlib as _mpl
+                arrowstyle = '<-' if msg['return_msg'] else '->'
+                d.ax.annotate('', xy=(dst_x, msg_y), xytext=(src_x, msg_y),
+                               arrowprops=dict(
+                                   arrowstyle=arrowstyle,
+                                   color=color, lw=lw,
+                                   linestyle=ls,
+                                   mutation_scale=10,
+                               ), zorder=12)
+
+            # Message label: above the arrow line, centered
+            if msg['label']:
+                mid_x = (src_x + dst_x) / 2
+                d.ax.text(mid_x, msg_y + 0.06, msg['label'],
+                          ha='center', va='bottom',
+                          fontsize=self.FS_MSG, zorder=13,
+                          bbox=dict(facecolor='white', edgecolor='none', pad=0))
+
+        # ── Boundary + FIG. label ─────────────────────────────────────────────
+        d.boundary(self.BND_X1, self.BND_Y1, self.BND_X2, self.BND_Y2)
+        d.fig_label()
+        d.save()
+        return output_path

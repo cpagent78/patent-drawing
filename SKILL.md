@@ -505,8 +505,149 @@ fig.render('fig3.png')
 | 상황 | 권장 도구 |
 |------|---------|
 | 플로우차트, 워크플로우 | **PatentFigure** |
-| 시스템 아키텍처 블록다이어그램 | `patent_drawing_lib.layout()` |
-| 시퀀스 다이어그램 | `patent_drawing_lib.sequence_diagram()` |
-| 수평 파이프라인 (3-5 단계) | `patent_drawing_lib.horizontal_pipeline_flow()` |
+| 시스템 아키텍처 블록다이어그램 | **PatentFigure** `direction='LR'` |
+| 시퀀스 다이어그램 | **PatentSequence** (Research 9 신규) |
+| 수평 파이프라인 (3-5 단계) | **PatentFigure** `direction='LR'` |
+| 버스 아키텍처 (CPU-Memory-Bus) | **PatentFigure + bus()** (Research 9 신규) |
 | 수동 좌표가 필요한 특수 레이아웃 | `patent_drawing_lib` 직접 사용 |
 | 9+ 노드 플로우차트 | **PatentFigure + render_multi()** |
+
+---
+
+## Phase 9 신기능 (Research 9)
+
+### 1. from_spec() 정확도 개선
+
+```
+# 진단 키워드 자동 → diamond 형태
+S400: 신뢰도 여부 판단          → diamond (여부 판단 감지)
+S700: 전문의 승인 여부 판단      → diamond (여부 판단 감지)
+
+# "후 종료" 패턴 → 자동 End 노드 분기
+S800: 거부 시 수동 프로세스로 전환 후 종료   → diamond + _end_S800 END 노드 생성
+S300: 실패 시 거부 후 종료                  → diamond + _end_S300 END 노드 생성
+
+# 병렬 노드 (S600a, S600b, S600c) → node_group() 자동 적용
+S600a: 토큰 잔액 차감 처리
+S600b: 수신자 잔액 증가 처리
+S600c: 트랜잭션 로그 기록
+→ 세 노드가 같은 행에 나란히 배치됨
+
+# 참조번호: Sxxx → 숫자만 (S100 → 첫 줄 "100")
+# from_spec() 생성 노드는 모두 USPTO 참조번호 규칙 자동 준수
+```
+
+### 2. bus() — 버스 연결 토폴로지
+
+```python
+fig = PatentFigure('FIG. 6', direction='LR')
+fig.node('CPU',   '610\nCPU', shape='process')
+fig.node('MEM',   '620\nMemory', shape='process')
+fig.node('GPU',   '630\nGPU', shape='process')
+fig.node('STORE', '640\nStorage', shape='cylinder')
+
+fig.node_group(['CPU', 'MEM', 'GPU', 'STORE'])
+
+# 수평 버스 바 그리기 — 각 노드에서 stub 연결
+fig.bus('DATA_BUS', ['CPU', 'MEM', 'GPU', 'STORE'],
+        label='810\nData Bus', orientation='H')
+
+# 수직 버스: orientation='V' (노드 오른쪽에 수직 버스)
+```
+
+### 3. edge() label_back — 양방향 화살표 각각 라벨
+
+```python
+# 단방향 (기존)
+fig.edge('A', 'B', label='request')
+
+# 양방향 — 양쪽 라벨 각각
+fig.edge('A', 'B', label='request', label_back='response', bidir=True)
+# 결과: 화살표 위에 "request", 아래에 "response"
+```
+
+### 4. PatentSequence — 시퀀스 다이어그램
+
+```python
+import sys
+sys.path.insert(0, '<skill_dir>/scripts')
+from patent_figure import PatentSequence
+
+fig = PatentSequence('FIG. 3')
+
+# 액터 등록 (왼→오른 순서로 균등 배치)
+fig.actor('User',   'user')
+fig.actor('Server', 'server')
+fig.actor('DB',     'db')
+
+# 메시지 (순서대로 위→아래)
+fig.message('user',   'server', 'login(id, pw)')
+fig.message('server', 'db',     'query(id)')
+fig.message('db',     'server', 'result',       return_msg=True)  # 점선 ←
+fig.message('server', 'user',   'JWT token',    return_msg=True)  # 점선 ←
+
+fig.render('fig3_seq.png')
+```
+
+- `return_msg=True` → 점선 화살표 (응답 메시지)
+- 생략 시 → 실선 화살표 (요청 메시지)
+- 액터 수직 라이프라인 자동 그리기
+- 메시지 수가 많을수록 자동으로 수직 간격 확보
+
+### 5. 에러 복구 (Phase 9)
+
+```python
+# 빈 텍스트 → 경고 + id 사용
+fig.node('S100', '')   # warning: empty text, uses 'S100'
+
+# 중복 ID → 경고 + 덮어쓰기
+fig.node('S100', 'First')
+fig.node('S100', 'Second')  # warning: duplicate id, overwrites
+
+# 200자+ 텍스트 → 자동 줄바꿈 + 경고
+fig.node('S200', '매우긴텍스트' * 30)  # warning + auto-wrap
+
+# validate()에서 순환 감지
+warnings = fig.validate()
+# → "Cycle detected (will be treated as back-edge): S100 → S200 → S100"
+```
+
+### 6. 한글 폰트 자동 설정 (Research 8)
+
+한글 텍스트 사용 시 특별한 설정 필요 없음:
+
+```python
+# 그냥 한글로 쓰면 됨 — Apple SD Gothic Neo 자동 감지
+fig.node('S100', '100\n환자 데이터 수집', shape='start')
+fig.node('S200', '200\n데이터 전처리')
+
+# 확인: import 시 자동으로 폰트 설정됨
+# from patent_figure import PatentFigure  ← 이 줄에서 _setup_korean_font() 실행
+```
+
+지원 폰트 우선순위:
+1. Apple SD Gothic Neo (macOS 기본 — 권장)
+2. AppleGothic
+3. NanumGothic / NanumMyeongjo
+4. Arial Unicode MS
+5. DejaVu Sans (폴백 — 한글 미지원)
+
+### 7. 스타일 프리셋 (Research 8)
+
+```python
+fig.preset('uspto')        # 표준 USPTO — 실선, 표준 크기
+fig.preset('draft')        # 초안 — 두꺼운 선, 라운드 코너
+fig.preset('presentation') # 발표용 — 굵은 선, 큰 화살촉
+```
+
+### 8. EdgeRouter corner_radius (Research 7-8)
+
+```python
+fig.preset('draft')  # corner_radius=0.08 자동 설정
+# 또는 직접:
+fig.style(corner_radius=0.10)  # 라운드 코너 반경 (인치)
+```
+
+`corner_radius`가 설정되면 EdgeRouter가 활성화되어:
+- 베지에 곡선 라운드 코너 렌더링
+- A* 격자 기반 장애물 회피 자동 활성화 (교차 감지 시)

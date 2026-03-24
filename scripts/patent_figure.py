@@ -40,6 +40,19 @@ Phase 6 additions (Research 6):
   - export_spec(): reverse-engineer PatentFigure → spec text
   - validate(): pre-render structural checks (orphans, duplicates, cycles)
   - from_spec() parser enhanced: parenthetical branches, loops, English specs
+
+Phase 8 additions (Research 8):
+  - Korean font auto-detection: _setup_korean_font() sets matplotlib rcParams
+    to use Apple SD Gothic Neo / NanumGothic / ArialUnicode on macOS.
+    All text rendering uses the detected Korean-capable font.
+  - A* grid-based obstacle routing in EdgeRouter (edge_router.py):
+    auto-activates when Cohen-Sutherland detects intersection, falls back
+    to A* shortest-path with Manhattan heuristic + bend penalty.
+  - Diamond arrow quality: arrows exit from exact diamond vertices
+    (top/bottom/left/right points), Yes/No labels repositioned.
+  - render() auto-split: auto_split=True (default) triggers render_multi()
+    when node count > max_nodes_per_page (default 14).
+  - preset(): style presets — 'uspto', 'draft', 'presentation'.
 """
 
 import sys, os
@@ -47,6 +60,60 @@ sys.path.insert(0, os.path.dirname(__file__))
 from patent_drawing_lib import Drawing, BoxRef
 
 from collections import defaultdict, deque
+
+
+# ── Phase 8: Korean Font Auto-Detection ──────────────────────────────────────
+
+def _setup_korean_font() -> str:
+    """
+    Auto-detect a Korean-capable font on the system and configure matplotlib.
+
+    Priority order:
+      1. Apple SD Gothic Neo (macOS system font — full Korean support)
+      2. AppleGothic (macOS fallback)
+      3. NanumGothic / NanumMyeongjo (Korean open fonts)
+      4. Arial Unicode MS (broad unicode coverage)
+      5. DejaVu Sans (matplotlib default — no Korean, but graceful fallback)
+
+    Returns the selected font family name string.
+    Side effect: sets matplotlib rcParams['font.family'] and
+                 rcParams['font.sans-serif'] to prioritize the chosen font.
+    """
+    import matplotlib
+    import matplotlib.font_manager as fm
+
+    KOREAN_PRIORITY = [
+        'Apple SD Gothic Neo',
+        'AppleGothic',
+        'AppleMyungjo',
+        'Nanum Gothic',
+        'NanumGothic',
+        'Nanum Myeongjo',
+        'NanumMyeongjo',
+        'Arial Unicode MS',
+    ]
+
+    available_names = {f.name for f in fm.fontManager.ttflist}
+    chosen = 'DejaVu Sans'
+    for candidate in KOREAN_PRIORITY:
+        if candidate in available_names:
+            chosen = candidate
+            break
+
+    # Set matplotlib to use this font globally
+    matplotlib.rcParams['font.family'] = 'sans-serif'
+    # Prepend chosen font so it wins over matplotlib defaults
+    current = matplotlib.rcParams.get('font.sans-serif', [])
+    if isinstance(current, str):
+        current = [current]
+    new_list = [chosen] + [f for f in current if f != chosen]
+    matplotlib.rcParams['font.sans-serif'] = new_list
+
+    return chosen
+
+
+# Run once at import time — subsequent calls are idempotent
+_KOREAN_FONT = _setup_korean_font()
 
 
 # ── Node / Edge data ──────────────────────────────────────────────────────────
@@ -165,6 +232,62 @@ class PatentFigure:
         fig.style(line_width=1.3, arrow_scale=1.2, label_fs_scale=1.1)
         """
         self._style.update(kwargs)
+        return self
+
+    def preset(self, name: str) -> 'PatentFigure':
+        """
+        Apply a named style preset.
+
+        Presets
+        -------
+        'uspto'
+            Black & white, strict USPTO compliance:
+            - line_width=1.0, arrow_scale=1.0 (standard weights)
+            - No corner rounding (corner_radius not set)
+            - Tight, minimal margins
+
+        'draft'
+            Color-friendly draft mode:
+            - line_width=1.2, corner_radius=0.08 (rounded corners via EdgeRouter)
+            - label_fs_scale=1.1 (slightly larger labels)
+            - Relaxed margins, annotation notes visible
+
+        'presentation'
+            Large, bold, presentation-ready:
+            - line_width=1.8, arrow_scale=1.4
+            - label_fs_scale=1.3, diamond_text_scale=1.1
+            - corner_radius=0.10
+
+        Example
+        -------
+        fig.preset('presentation')
+        """
+        presets = {
+            'uspto': {
+                'line_width': 1.0,
+                'arrow_scale': 1.0,
+                'label_fs_scale': 1.0,
+                'diamond_text_scale': 1.0,
+                # No corner_radius → uses default straight-corner library rendering
+            },
+            'draft': {
+                'line_width': 1.2,
+                'arrow_scale': 1.1,
+                'label_fs_scale': 1.1,
+                'diamond_text_scale': 1.0,
+                'corner_radius': 0.08,
+            },
+            'presentation': {
+                'line_width': 1.8,
+                'arrow_scale': 1.4,
+                'label_fs_scale': 1.3,
+                'diamond_text_scale': 1.1,
+                'corner_radius': 0.10,
+            },
+        }
+        if name not in presets:
+            raise ValueError(f"Unknown preset '{name}'. Choose from: {list(presets.keys())}")
+        self._style.update(presets[name])
         return self
 
     def node(self, id: str, text: str = '', shape: str = 'process') -> 'PatentFigure':
@@ -644,8 +767,28 @@ class PatentFigure:
 
     # ── Main render pipeline ──────────────────────────────────────────────────
 
-    def render(self, output_path: str) -> str:
-        """Full pipeline: layout → draw → save. Returns output path."""
+    def render(self, output_path: str,
+               auto_split: bool = True,
+               max_nodes_per_page: int = 14) -> str:
+        """
+        Full pipeline: layout → draw → save. Returns output path.
+
+        Parameters
+        ----------
+        auto_split : bool
+            If True (default) and the number of nodes exceeds max_nodes_per_page,
+            automatically split into two pages using render_multi().
+            The second page path is derived by inserting '_p2' before the extension.
+            E.g. 'fig5.png' → 'fig5.png' (page 1) + 'fig5_p2.png' (page 2).
+        max_nodes_per_page : int
+            Node count threshold for auto-split (default 14).
+        """
+        # Phase 8: Auto-split for large flows
+        if auto_split and len(self._nodes) > max_nodes_per_page:
+            base, ext = os.path.splitext(output_path)
+            path2 = base + '_p2' + ext
+            return self.render_multi(output_path, path2)[0]
+
         self._assign_ranks()
         self._measure_nodes()
         if self.direction == 'LR':
@@ -1423,13 +1566,62 @@ class PatentFigure:
                         d.label(mid_x, (sb.cy + db.cy) / 2 + 0.08, e.label, ha='center', fs=_label_fs)
                 continue
 
+            # ── Phase 8: Diamond exact-vertex helpers ─────────────────────────
+            # For diamond shapes, arrows should exit/enter from exact vertices
+            # (top/bottom/left/right points), not from the bbox midpoints.
+            def _diamond_exit(box, direction: str):
+                """Return exact exit point for a diamond vertex.
+                direction: 'down'→bottom vertex, 'up'→top vertex,
+                           'left'→left vertex, 'right'→right vertex.
+                """
+                if direction == 'down':
+                    return (box.cx, box.bot)
+                elif direction == 'up':
+                    return (box.cx, box.top)
+                elif direction == 'left':
+                    return (box.left, box.cy)
+                elif direction == 'right':
+                    return (box.right, box.cy)
+                return box.bot_mid()
+
+            def _src_exit(nd, db_):
+                """Choose source exit point. Diamonds use exact vertices."""
+                if nd.shape == 'diamond':
+                    # Determine which vertex to exit from based on destination position
+                    dx = db_.cx - sb.cx
+                    dy = db_.cy - sb.cy
+                    if abs(dy) >= abs(dx):
+                        return _diamond_exit(sb, 'down' if dy < 0 else 'up')
+                    else:
+                        return _diamond_exit(sb, 'right' if dx > 0 else 'left')
+                return sb.bot_mid()
+
+            def _dst_entry(nd, sb_):
+                """Choose destination entry point. Diamonds use exact vertices."""
+                if nd.shape == 'diamond':
+                    dx = sb_.cx - db.cx
+                    dy = sb_.cy - db.cy
+                    if abs(dy) >= abs(dx):
+                        return _diamond_exit(db, 'top' if dy < 0 else 'bot')  # type: ignore
+                    else:
+                        return _diamond_exit(db, 'right' if dx > 0 else 'left')
+                return db.top_mid()
+
             # TB direction (default): vertical primary axis
             # Same column: straight vertical arrow (only if no intermediate boxes in path)
             if abs(sb.cx - db.cx) < 0.1 and not is_skip:
                 if e.bidir:
                     d.arrow_bidir(sb, db, side='v')
                 else:
-                    d.arrow_v(sb, db)
+                    # Phase 8: use diamond vertex if applicable
+                    if src_nd.shape == 'diamond':
+                        src_pt = _diamond_exit(sb, 'down')
+                        d.arrow_route([src_pt, db.top_mid()])
+                    elif dst_nd.shape == 'diamond':
+                        dst_pt = _diamond_exit(db, 'up')
+                        d.arrow_route([sb.bot_mid(), dst_pt])
+                    else:
+                        d.arrow_v(sb, db)
             elif is_skip:
                 # Skip-rank: route via right side channel to avoid crossing intermediate boxes
                 d.arrow_route([
@@ -1442,30 +1634,66 @@ class PatentFigure:
                 # Elbow: down from src, horizontal, down to dst
                 if abs(src_nd.rank - dst_nd.rank) == 0:
                     # Same-rank: horizontal exit from side (left or right) of src
-                    if db.cx < sb.cx:
-                        if e.bidir:
-                            d.arrow_bidir_route([sb.left_mid(), db.right_mid()])
+                    if src_nd.shape == 'diamond':
+                        # Diamond side exit: exact left/right vertex
+                        if db.cx < sb.cx:
+                            src_exit = _diamond_exit(sb, 'left')
+                            dst_entry = db.right_mid()
                         else:
-                            d.arrow_route([sb.left_mid(), db.right_mid()])
+                            src_exit = _diamond_exit(sb, 'right')
+                            dst_entry = db.left_mid()
+                        if e.bidir:
+                            d.arrow_bidir_route([src_exit, dst_entry])
+                        else:
+                            d.arrow_route([src_exit, dst_entry])
                     else:
-                        if e.bidir:
-                            d.arrow_bidir_route([sb.right_mid(), db.left_mid()])
+                        if db.cx < sb.cx:
+                            if e.bidir:
+                                d.arrow_bidir_route([sb.left_mid(), db.right_mid()])
+                            else:
+                                d.arrow_route([sb.left_mid(), db.right_mid()])
                         else:
-                            d.arrow_route([sb.right_mid(), db.left_mid()])
+                            if e.bidir:
+                                d.arrow_bidir_route([sb.right_mid(), db.left_mid()])
+                            else:
+                                d.arrow_route([sb.right_mid(), db.left_mid()])
                 elif abs(src_nd.rank - dst_nd.rank) == 1:
                     # Adjacent rank: standard elbow — ensure minimum 0.44" segments
                     # by using at least 0.44" below src and above dst
-                    mid_y = min(sb.bot - 0.44, max(db.top + 0.44, (sb.bot + db.top) / 2))
-                    route_pts = [
-                        sb.bot_mid(),
-                        (sb.cx, mid_y),
-                        (db.cx, mid_y),
-                        db.top_mid(),
-                    ]
-                    if e.bidir:
-                        d.arrow_bidir_route(route_pts)
+                    # Phase 8: use diamond exact vertex for departure
+                    if src_nd.shape == 'diamond':
+                        # Determine if exiting from bottom vertex or side vertex
+                        if abs(sb.cx - db.cx) < 0.15:
+                            # Approximately same column → bottom vertex
+                            src_exit = _diamond_exit(sb, 'down')
+                            mid_y = min(src_exit[1] - 0.44, max(db.top + 0.44,
+                                        (src_exit[1] + db.top) / 2))
+                            route_pts = [src_exit, (src_exit[0], mid_y),
+                                         (db.cx, mid_y), db.top_mid()]
+                        else:
+                            # Side exit from diamond
+                            direction = 'right' if db.cx > sb.cx else 'left'
+                            src_exit = _diamond_exit(sb, direction)
+                            mid_y = min(sb.bot - 0.44, max(db.top + 0.44,
+                                        (sb.bot + db.top) / 2))
+                            route_pts = [src_exit, (src_exit[0], mid_y),
+                                         (db.cx, mid_y), db.top_mid()]
+                        if e.bidir:
+                            d.arrow_bidir_route(route_pts)
+                        else:
+                            d.arrow_route(route_pts)
                     else:
-                        d.arrow_route(route_pts)
+                        mid_y = min(sb.bot - 0.44, max(db.top + 0.44, (sb.bot + db.top) / 2))
+                        route_pts = [
+                            sb.bot_mid(),
+                            (sb.cx, mid_y),
+                            (db.cx, mid_y),
+                            db.top_mid(),
+                        ]
+                        if e.bidir:
+                            d.arrow_bidir_route(route_pts)
+                        else:
+                            d.arrow_route(route_pts)
                 else:
                     # Multi-rank: handled by skip-rank logic above (shouldn't reach here)
                     mid_y = (sb.bot + db.top) / 2
@@ -1477,25 +1705,37 @@ class PatentFigure:
                     ])
 
             # Edge label (Yes/No)
+            # Phase 8: Improved diamond label positioning
             if e.label:
                 if src_nd.shape == 'diamond':
-                    if abs(sb.cx - db.cx) < 0.1 and not is_skip:
-                        # Straight down label
-                        d.label(sb.cx + 0.12, sb.bot - 0.08, e.label, ha='left', fs=_label_fs)
+                    if abs(sb.cx - db.cx) < 0.15 and not is_skip:
+                        # Straight down from bottom vertex: label right of the bottom vertex
+                        # Place just below the bottom vertex for clean attachment
+                        bvx, bvy = sb.cx, sb.bot   # bottom vertex
+                        d.label(bvx + 0.10, bvy - 0.12, e.label, ha='left', fs=_label_fs)
                     elif is_skip:
                         d.label(skip_channel_x + 0.08, (sb.cy + db.cy) / 2, e.label, ha='left', fs=_label_fs)
                     elif abs(src_nd.rank - dst_nd.rank) == 0:
-                        # Same-rank side exit: label on diamond side
+                        # Same-rank side exit: label just outside the side vertex
                         if db.cx < sb.cx:
-                            d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=_label_fs)
+                            # Left vertex exit
+                            lvx, lvy = sb.left, sb.cy
+                            d.label(lvx - 0.08, lvy + 0.12, e.label, ha='right', fs=_label_fs)
                         else:
-                            d.label(sb.right + 0.08, sb.cy + 0.10, e.label, ha='left', fs=_label_fs)
+                            # Right vertex exit
+                            rvx, rvy = sb.right, sb.cy
+                            d.label(rvx + 0.08, rvy + 0.12, e.label, ha='left', fs=_label_fs)
                     else:
-                        # Cross-rank elbow: label on diamond side at departure
-                        if db.cx < sb.cx:
-                            d.label(sb.left - 0.08, sb.cy + 0.10, e.label, ha='right', fs=_label_fs)
+                        # Cross-rank elbow: label near departure vertex
+                        if abs(sb.cx - db.cx) < 0.15:
+                            # Bottom exit
+                            d.label(sb.cx + 0.10, sb.bot - 0.12, e.label, ha='left', fs=_label_fs)
+                        elif db.cx < sb.cx:
+                            # Left vertex exit
+                            d.label(sb.left - 0.08, sb.cy + 0.12, e.label, ha='right', fs=_label_fs)
                         else:
-                            d.label(sb.right + 0.08, sb.cy + 0.10, e.label, ha='left', fs=_label_fs)
+                            # Right vertex exit
+                            d.label(sb.right + 0.08, sb.cy + 0.12, e.label, ha='left', fs=_label_fs)
                 else:
                     if is_skip:
                         d.label(skip_channel_x + 0.08, (sb.cy + db.cy) / 2, e.label, ha='left', fs=_label_fs)

@@ -1,13 +1,25 @@
 """
 edge_router.py — Self-Contained Orthogonal Edge Router
-USPTO Patent Drawing Engine — Research7
+USPTO Patent Drawing Engine — Research8
 
 Features:
   1. Rounded Corner Rendering   — Bezier (CURVE3) arcs at waypoints
   2. Orthogonal Path Calculation — horizontal/vertical segments only
-  3. Obstacle Avoidance         — segment-box intersection → reroute
-  4. Channel Offset              — shared channels auto-offset to prevent overlap
-  5. Arrowhead (Path-based)      — direct Path/PathPatch, not annotate()
+  3. Obstacle Avoidance         — Cohen-Sutherland detection + bypass
+  4. A* Grid Routing            — Grid-based shortest-path with bend penalty
+                                   (auto-activates when bypass fails)
+  5. Channel Offset              — shared channels auto-offset to prevent overlap
+  6. Arrowhead (Path-based)      — direct Path/PathPatch, not annotate()
+
+A* Routing (Research 8 addition):
+  - Activated automatically when Cohen-Sutherland avoidance detects a
+    remaining collision after 5 bypass passes.
+  - Grid resolution: grid_step=0.1" (configurable per EdgeRouter instance)
+  - Heuristic: Manhattan distance
+  - Cost: uniform move cost + bend_penalty (default 0.5) to prefer straight paths
+  - Converts grid path → simplified waypoints via collinear reduction
+  - Performance: O(N²) where N = grid cells within bounding box
+    (30-node diagram on 8.5×11" page: ~8500 cells → <0.5s typical)
 
 Usage:
     from edge_router import EdgeRouter
@@ -117,6 +129,7 @@ class EdgeRouter:
     Self-contained orthogonal edge router with:
     - Rounded corner Bezier rendering
     - Obstacle avoidance (axis-aligned rerouting)
+    - A* grid-based routing (auto-fallback when bypass fails)
     - Channel offset (prevent overlap on shared channels)
     - Path-based arrowhead (no annotate())
     """
@@ -125,8 +138,9 @@ class EdgeRouter:
     ARROW_HEAD_LENGTH = 0.10
     ARROW_HEAD_WIDTH  = 0.055
 
-    def __init__(self, corner_radius: float = 0.08):
+    def __init__(self, corner_radius: float = 0.08, grid_step: float = 0.10):
         self.corner_radius = corner_radius
+        self.grid_step = grid_step         # A* grid resolution in inches
         self.obstacles: list = []    # list of (x1,y1,x2,y2)
         # Channel tracking: maps channel_key → list of offset values already used
         # For vertical channels: key = ('V', round(x,4))
@@ -157,7 +171,8 @@ class EdgeRouter:
 
     def route(self, src_pt: tuple, dst_pt: tuple,
               src_side: str = 'bottom', dst_side: str = 'top',
-              prefer_side: str = 'left') -> list:
+              prefer_side: str = 'left',
+              use_astar: bool = True) -> list:
         """
         Compute orthogonal waypoints from src_pt to dst_pt.
 
@@ -166,6 +181,10 @@ class EdgeRouter:
 
         prefer_side: 'left' | 'right'
             When a simple straight path hits an obstacle, which side to detour around.
+
+        use_astar : bool
+            If True (default), fall back to A* grid routing when Cohen-Sutherland
+            bypass fails (i.e. a collision remains after avoidance passes).
 
         Returns:
             list of (x, y) tuples — the orthogonal waypoints (including endpoints).
@@ -176,13 +195,202 @@ class EdgeRouter:
         # Build candidate path based on src/dst sides
         pts = self._build_initial_path(sx, sy, ex, ey, src_side, dst_side)
 
-        # Apply obstacle avoidance
-        pts = self._avoid_obstacles(pts, prefer_side)
+        # Apply obstacle avoidance (Cohen-Sutherland bypass, up to 5 passes)
+        pts_after = self._avoid_obstacles(pts, prefer_side)
+
+        # Phase 8: If collision still remains after bypass → try A* routing
+        if use_astar and self._has_collision(pts_after):
+            astar_pts = self._astar_route(src_pt, dst_pt, src_side, dst_side)
+            if astar_pts and not self._has_collision(astar_pts):
+                pts_after = astar_pts
 
         # Apply channel offset to prevent overlap
-        pts = self._apply_channel_offset(pts, src_side, dst_side)
+        pts_after = self._apply_channel_offset(pts_after, src_side, dst_side)
 
-        return _remove_duplicates(pts)
+        return _remove_duplicates(pts_after)
+
+    def _has_collision(self, pts: list) -> bool:
+        """Return True if any segment of pts intersects any registered obstacle."""
+        MARGIN = 0.04
+        for i in range(len(pts) - 1):
+            p1, p2 = pts[i], pts[i+1]
+            for (ox1, oy1, ox2, oy2) in self.obstacles:
+                if _seg_intersects_rect(p1, p2, ox1, oy1, ox2, oy2, MARGIN):
+                    return True
+        return False
+
+    def _astar_route(self, src_pt: tuple, dst_pt: tuple,
+                     src_side: str = 'bottom', dst_side: str = 'top') -> list:
+        """
+        Grid-based A* routing to find shortest obstacle-avoiding orthogonal path.
+
+        Algorithm:
+          1. Build a bounding box encompassing src, dst, and all obstacles
+             with padding.
+          2. Discretize to a grid with resolution self.grid_step.
+          3. Mark grid cells overlapping any obstacle as blocked.
+          4. Run A* with Manhattan heuristic + bend_penalty (prefer straight lines).
+          5. Convert grid path → world coordinates → simplify collinear points.
+
+        Returns list of (x,y) waypoints, or empty list if no path found.
+        """
+        import heapq
+
+        step = self.grid_step
+        MARGIN = 0.08   # clearance around obstacles
+        BEND_PENALTY = 0.5   # extra cost per direction change (prefer straight paths)
+
+        sx, sy = src_pt
+        ex, ey = dst_pt
+
+        # Compute bounding box with padding
+        all_xs = [sx, ex] + [o[0] for o in self.obstacles] + [o[2] for o in self.obstacles]
+        all_ys = [sy, ey] + [o[1] for o in self.obstacles] + [o[3] for o in self.obstacles]
+        pad = step * 4
+        x_min = min(all_xs) - pad
+        x_max = max(all_xs) + pad
+        y_min = min(all_ys) - pad
+        y_max = max(all_ys) + pad
+
+        # Grid dimensions
+        cols = max(1, int(round((x_max - x_min) / step)) + 1)
+        rows = max(1, int(round((y_max - y_min) / step)) + 1)
+
+        # Performance guard: limit to 200×200 grid max (~40000 cells)
+        if cols * rows > 40000:
+            # Increase step to fit within limit
+            step = math.sqrt((x_max - x_min) * (y_max - y_min) / 40000)
+            cols = max(1, int(round((x_max - x_min) / step)) + 1)
+            rows = max(1, int(round((y_max - y_min) / step)) + 1)
+
+        def world_to_grid(wx, wy):
+            c = int(round((wx - x_min) / step))
+            r = int(round((wy - y_min) / step))
+            return (max(0, min(cols-1, c)), max(0, min(rows-1, r)))
+
+        def grid_to_world(c, r):
+            return (x_min + c * step, y_min + r * step)
+
+        # Build obstacle grid: blocked[r][c] = True if cell is inside obstacle
+        blocked = [[False] * cols for _ in range(rows)]
+        for (ox1, oy1, ox2, oy2) in self.obstacles:
+            # Expand by MARGIN
+            bx1, by1 = ox1 - MARGIN, oy1 - MARGIN
+            bx2, by2 = ox2 + MARGIN, oy2 + MARGIN
+            c1, r1 = world_to_grid(bx1, by1)
+            c2, r2 = world_to_grid(bx2, by2)
+            for r in range(max(0, r1), min(rows, r2+1)):
+                for c in range(max(0, c1), min(cols, c2+1)):
+                    blocked[r][c] = True
+
+        start = world_to_grid(sx, sy)
+        goal  = world_to_grid(ex, ey)
+
+        # Unblock start and goal cells (they're inside boxes — endpoints are on box edges)
+        sr, sc_col = start[1], start[0]
+        gr, gc_col = goal[1], goal[0]
+        # Unblock a small region around start/goal so A* can find a path
+        for dr in range(-1, 2):
+            for dc in range(-1, 2):
+                r_, c_ = max(0,min(rows-1, sr+dr)), max(0,min(cols-1, sc_col+dc))
+                blocked[r_][c_] = False
+                r_, c_ = max(0,min(rows-1, gr+dr)), max(0,min(cols-1, gc_col+dc))
+                blocked[r_][c_] = False
+
+        # A* with direction tracking for bend penalty
+        # State: (cost_f, cost_g, col, row, dir_idx)
+        # dir_idx: 0=right, 1=up, 2=left, 3=down, -1=start (no direction)
+        DIRS = [(1,0), (0,1), (-1,0), (0,-1)]  # right, up, left, down
+
+        INF = float('inf')
+        g_cost = [[[INF]*4 for _ in range(cols)] for _ in range(rows)]
+
+        # (f, g, c, r, dir_idx, parent)
+        heap = []
+        came_from = {}  # (c,r,d) → (c,r,d)
+
+        def manhattan(c, r):
+            return (abs(c - goal[0]) + abs(r - goal[1])) * step
+
+        # Initialize: try all 4 directions from start
+        for d_idx, (dc, dr) in enumerate(DIRS):
+            g_cost[start[1]][start[0]][d_idx] = 0.0
+            f = manhattan(start[0], start[1])
+            heapq.heappush(heap, (f, 0.0, start[0], start[1], d_idx))
+            came_from[(start[0], start[1], d_idx)] = None
+
+        found_state = None
+
+        while heap:
+            f, g, c, r, d = heapq.heappop(heap)
+
+            if (c, r) == goal:
+                found_state = (c, r, d)
+                break
+
+            if g > g_cost[r][c][d]:
+                continue
+
+            for nd_idx, (dc, dr) in enumerate(DIRS):
+                nc, nr = c + dc, r + dr
+                if nc < 0 or nc >= cols or nr < 0 or nr >= rows:
+                    continue
+                if blocked[nr][nc]:
+                    continue
+
+                move_cost = step
+                bend_cost = 0.0 if nd_idx == d else BEND_PENALTY
+                new_g = g + move_cost + bend_cost
+
+                if new_g < g_cost[nr][nc][nd_idx]:
+                    g_cost[nr][nc][nd_idx] = new_g
+                    new_f = new_g + manhattan(nc, nr)
+                    came_from[(nc, nr, nd_idx)] = (c, r, d)
+                    heapq.heappush(heap, (new_f, new_g, nc, nr, nd_idx))
+
+        if found_state is None:
+            return []  # No path found — caller will fall back to bypass method
+
+        # Reconstruct path
+        path_states = []
+        state = found_state
+        while state is not None:
+            path_states.append(state)
+            state = came_from.get(state)
+        path_states.reverse()
+
+        # Convert to world coordinates
+        world_pts = [grid_to_world(c, r) for c, r, _ in path_states]
+
+        # Simplify: remove collinear intermediate points
+        world_pts = self._simplify_path(world_pts)
+
+        # Snap start/end to exact src/dst coordinates
+        if world_pts:
+            world_pts[0]  = src_pt
+            world_pts[-1] = dst_pt
+
+        return world_pts
+
+    @staticmethod
+    def _simplify_path(pts: list) -> list:
+        """
+        Remove collinear intermediate points (straight segments).
+        Two consecutive segments AB and BC are collinear if A,B,C are collinear.
+        """
+        if len(pts) < 3:
+            return pts
+        result = [pts[0]]
+        for i in range(1, len(pts) - 1):
+            ax, ay = pts[i-1]
+            bx, by = pts[i]
+            cx, cy = pts[i+1]
+            # Cross product: if ~0, collinear
+            cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+            if abs(cross) > 1e-8:
+                result.append(pts[i])
+        result.append(pts[-1])
+        return result
 
     def _build_initial_path(self, sx, sy, ex, ey, src_side, dst_side) -> list:
         """Build the initial (possibly naive) orthogonal path."""

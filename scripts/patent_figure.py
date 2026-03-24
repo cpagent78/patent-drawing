@@ -215,6 +215,21 @@ class PatentFigure:
         self.max_text_width: float = None
         # Phase 9: bus connections
         self._buses: list[dict] = []
+        # Research 14: dynamic page size flag
+        self._dynamic_page: bool = False
+
+    def dynamic_page_size(self, enable: bool = True) -> 'PatentFigure':
+        """
+        Research 14: Enable dynamic page size adjustment.
+
+        When enabled, the page size is expanded based on the total text length
+        of all nodes, so that very long labels or many nodes don't get cramped.
+        The page is expanded in multiples of the standard size (up to 2×).
+
+        Returns self for method chaining.
+        """
+        self._dynamic_page = enable
+        return self
 
     def style(self, **kwargs) -> 'PatentFigure':
         """
@@ -956,6 +971,9 @@ class PatentFigure:
             return self.render_multi(output_path, path2)[0]
 
         self._assign_ranks()
+        # Research 14: dynamic page size adjustment
+        if self._dynamic_page:
+            self._apply_dynamic_page_size()
         self._measure_nodes()
         if self.direction == 'LR':
             positions = self._compute_positions_lr()
@@ -963,6 +981,91 @@ class PatentFigure:
             positions = self._compute_positions()
         self._draw(output_path, positions)
         return output_path
+
+    def _apply_dynamic_page_size(self):
+        """
+        Research 14 Phase 2: Dynamically adjust page/boundary size based on
+        node text lengths and count, ensuring adequate space for all nodes.
+
+        Expansion rules:
+        - Count total chars across all node texts
+        - If char density (chars / available area) is too high, expand page
+        - Expansion is up to 2× standard page size, in portrait or landscape
+        """
+        total_chars = sum(len(nd.text) for nd in self._nodes.values())
+        n_nodes = len(self._nodes)
+        # Baseline: ~50 chars per node fits comfortably at 10pt in standard page
+        baseline_chars = n_nodes * 50
+        if total_chars <= baseline_chars:
+            return  # no expansion needed
+
+        ratio = total_chars / max(baseline_chars, 1)
+        # Expand BND area proportionally, up to 2×
+        expand = min(2.0, max(1.0, ratio))
+        if expand <= 1.05:
+            return  # marginal — skip
+
+        # Expand boundary and page by scaling available content area
+        # Only expand vertically for TB, horizontally for LR
+        if self.direction == 'TB':
+            # Expand BND_Y2 upward (more vertical space)
+            orig_h = self.BND_Y2 - self.BND_Y1
+            new_h = orig_h * expand
+            # Keep BND_Y1 fixed, extend BND_Y2
+            new_bnd_y2 = self.BND_Y1 + new_h
+            # Also extend PAGE_H
+            self.PAGE_H = max(self.PAGE_H, new_bnd_y2 + 0.60)
+            self.BND_Y2 = new_bnd_y2
+        else:
+            # LR: expand horizontally
+            orig_w = self.BND_X2 - self.BND_X1
+            new_w = orig_w * expand
+            new_bnd_x2 = self.BND_X1 + new_w
+            self.PAGE_W = max(self.PAGE_W, new_bnd_x2 + 0.60)
+            self.BND_X2 = new_bnd_x2
+
+    @staticmethod
+    def _resolve_label_collisions(label_positions: list) -> list:
+        """
+        Research 14 Phase 3: Detect and resolve overlapping edge labels.
+
+        label_positions: list of dicts with keys:
+            x, y, text, ha, fs  (as would be passed to d.label())
+
+        Returns a new list with y-offsets applied to avoid overlaps.
+        Two labels are considered overlapping if |dy| < 0.18" and
+        the x ranges are within 1.5" of each other.
+
+        Strategy:
+        - Sort by y descending (top-to-bottom)
+        - For each label, check against all already-placed labels
+        - If collision detected, nudge y by ±0.16" (alternating)
+        """
+        COLLISION_Y = 0.18   # labels within this y distance are considered overlapping
+        COLLISION_X = 1.50   # labels within this x distance may collide
+        NUDGE = 0.16
+
+        resolved = [dict(p) for p in label_positions]  # copy
+        placed = []  # list of (x, y, text) after resolution
+
+        for item in resolved:
+            x, y, text = item['x'], item['y'], item.get('text', '')
+            nudge_dir = 1  # start by nudging up
+            for attempt in range(8):
+                collision = False
+                for px, py, _ in placed:
+                    if abs(x - px) < COLLISION_X and abs(y - py) < COLLISION_Y:
+                        collision = True
+                        break
+                if not collision:
+                    break
+                # Apply nudge (alternate up/down, increasing distance)
+                y = item['y'] + nudge_dir * NUDGE * ((attempt // 2) + 1)
+                nudge_dir *= -1
+            item['y'] = y
+            placed.append((x, y, text))
+
+        return resolved
 
     def render_multi(self, *output_paths: str, split_at: int = None) -> list[str]:
         """
@@ -1493,6 +1596,14 @@ class PatentFigure:
         _style_originals = self._apply_style()
 
         d = Drawing(output_path, fig_num=fig_num)
+
+        # Research 14 Phase 3: Intercept d.label() calls to accumulate then resolve collisions
+        # We defer all edge-label placements and flush them at end with collision avoidance.
+        _deferred_labels: list = []
+        _orig_d_label = d.label
+        def _intercepted_label(x, y, text, ha='center', fs=None):
+            _deferred_labels.append({'x': x, 'y': y, 'text': text, 'ha': ha, 'fs': fs})
+        d.label = _intercepted_label
 
         # Use the font size determined by _measure_nodes (may be smaller for deep flows)
         fs = getattr(self, '_active_fs', self.DEFAULT_FS)
@@ -2101,6 +2212,11 @@ class PatentFigure:
                     d.ax.text(bus_x + 0.05, (bus_y1 + bus_y2) / 2, bus_label,
                               ha='left', va='center', fontsize=8, zorder=11,
                               bbox=dict(facecolor='white', edgecolor='none', pad=1))
+
+        # Research 14 Phase 3: Flush deferred labels with collision resolution
+        resolved_labels = self._resolve_label_collisions(_deferred_labels)
+        for lbl in resolved_labels:
+            _orig_d_label(lbl['x'], lbl['y'], lbl['text'], ha=lbl.get('ha', 'center'), fs=lbl.get('fs'))
 
         # Boundary + label
         d.boundary(self.BND_X1, self.BND_Y1, self.BND_X2, self.BND_Y2)

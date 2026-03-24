@@ -2440,26 +2440,32 @@ def quick_draw(spec_text: str, output_path: str,
                lang: str = 'auto',
                direction: str = 'TB',
                fig_label: str = 'FIG. 1',
-               diagram_type: str = 'flowchart') -> dict:
+               diagram_type: str = 'auto') -> dict:
     """
     명세서 텍스트 → USPTO 규격 PNG 한방에 생성.
     특허방 모모(patent-drawing 스킬 사용자)용 고수준 API.
 
     Args:
-        spec_text:   명세서 텍스트 (한글/영어 자동 감지).
-                     S100: ... 형식 한 줄씩.
-        output_path: 출력 PNG 경로 (e.g. 'fig1.png').
-        preset:      'uspto' | 'draft' | 'presentation' (기본: 'uspto').
-        lang:        'auto' | 'ko' | 'en'  — 파싱 힌트 (현재 auto-detect).
-        direction:   'TB' (top-bottom, 기본) | 'LR' (left-right).
-        fig_label:   FIG. 라벨 (기본: 'FIG. 1').
+        spec_text:    명세서 텍스트 (한글/영어 자동 감지).
+                      S100: ... 형식 한 줄씩.
+        output_path:  출력 PNG 경로 (e.g. 'fig1.png').
+        preset:       'uspto' | 'draft' | 'presentation' (기본: 'uspto').
+        lang:         'auto' | 'ko' | 'en'  — 파싱 힌트 (현재 auto-detect).
+        direction:    'TB' (top-bottom, 기본) | 'LR' (left-right).
+        fig_label:    FIG. 라벨 (기본: 'FIG. 1').
+        diagram_type: 'auto' (기본, 자동 감지) | 'flowchart' | 'state' |
+                      'sequence' | 'layered' | 'timing' | 'dfd' | 'er' | 'hardware'
 
     Returns:
         dict with keys:
-            'pages'      : list[str]  — 생성된 PNG 파일 경로 목록 (1~2개).
-            'node_count' : int        — 파싱된 노드 수.
-            'warnings'   : list[str]  — 구조 경고 목록.
-            'validation' : dict       — {'passed': bool, 'issues': list[str]}.
+            'pages'               : list[str]  — 생성된 PNG 파일 경로 목록 (1~2개).
+            'node_count'          : int        — 파싱된 노드 수.
+            'warnings'            : list[str]  — 구조 경고 목록.
+            'validation'          : dict       — {'passed': bool, 'issues': list[str]}.
+            'elapsed_sec'         : float      — 소요 시간(초).
+            'detected_type'       : str        — 최종 사용된 도면 타입.
+            'detection_reason'    : str        — 타입 판단 근거 (auto일 때).
+            'detection_confidence': float      — 감지 신뢰도 (auto일 때).
 
     Example::
 
@@ -2473,27 +2479,62 @@ def quick_draw(spec_text: str, output_path: str,
         S500: 사용자에게 추천 목록 제공
         \"\"\"
         result = quick_draw(spec, 'output.png')
-        print(result['pages'])     # ['output.png'] or ['output.png', 'output_p2.png']
-        print(result['warnings'])  # [] if clean
+        print(result['pages'])           # ['output.png'] or ['output.png', 'output_p2.png']
+        print(result['detected_type'])   # 'flowchart' (auto-detected)
+        print(result['warnings'])        # [] if clean
     """
     import os
     import time
 
     t0 = time.time()
 
-    # ── 0. Route to specialized diagram type if requested ─────────────────────
+    # ── 0. Auto-detect diagram type if requested ──────────────────────────────
+    detection = None
+    if diagram_type == 'auto':
+        try:
+            import sys as _sys
+            import os as _os
+            _skill_scripts = _os.path.dirname(_os.path.abspath(__file__))
+            if _skill_scripts not in _sys.path:
+                _sys.path.insert(0, _skill_scripts)
+            from detect_type import detect_diagram_type as _detect
+            detection = _detect(spec_text)
+            diagram_type = detection['type']
+        except ImportError:
+            # detect_type.py not found — fall back to flowchart
+            detection = {
+                'type': 'flowchart',
+                'confidence': 0.5,
+                'reason': 'detect_type 모듈 없음 — 기본값 flowchart',
+                'class': 'PatentFigure',
+            }
+            diagram_type = 'flowchart'
+
+    # ── 1. Route to specialized diagram type if requested ─────────────────────
     # diagram_type: 'flowchart' (default), 'state', 'sequence', 'layered',
     #               'timing', 'dfd', 'er', 'hardware'
     # For non-flowchart types, parse spec in a simplified manner.
 
+    def _with_detection(base_result: dict) -> dict:
+        """Inject detection metadata into any result dict."""
+        if detection is not None:
+            base_result.setdefault('detected_type', detection['type'])
+            base_result.setdefault('detection_reason', detection['reason'])
+            base_result.setdefault('detection_confidence', detection['confidence'])
+        else:
+            base_result.setdefault('detected_type', diagram_type)
+            base_result.setdefault('detection_reason', '명시적 지정')
+            base_result.setdefault('detection_confidence', 1.0)
+        return base_result
+
     if diagram_type == 'state':
-        return _quick_draw_state(spec_text, output_path, fig_label, t0)
+        return _with_detection(_quick_draw_state(spec_text, output_path, fig_label, t0))
     elif diagram_type == 'sequence':
-        return _quick_draw_sequence(spec_text, output_path, fig_label, t0)
+        return _with_detection(_quick_draw_sequence(spec_text, output_path, fig_label, t0))
     elif diagram_type == 'layered':
-        return _quick_draw_layered(spec_text, output_path, fig_label, t0)
+        return _with_detection(_quick_draw_layered(spec_text, output_path, fig_label, t0))
     elif diagram_type == 'timing':
-        return _quick_draw_timing(spec_text, output_path, fig_label, t0)
+        return _with_detection(_quick_draw_timing(spec_text, output_path, fig_label, t0))
 
     # ── 1. Parse spec → PatentFigure ──────────────────────────────────────────
     fig = PatentFigure.from_spec(fig_label, spec_text, direction=direction)
@@ -2535,7 +2576,7 @@ def quick_draw(spec_text: str, output_path: str,
 
     elapsed = time.time() - t0
 
-    return {
+    result = {
         'pages':      pages,
         'node_count': node_count,
         'warnings':   warnings,
@@ -2545,6 +2586,7 @@ def quick_draw(spec_text: str, output_path: str,
         },
         'elapsed_sec': round(elapsed, 2),
     }
+    return _with_detection(result)
 
 
 def _validate_output_files(paths: list) -> list:

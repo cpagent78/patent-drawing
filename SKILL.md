@@ -339,20 +339,54 @@ python patent_draw.py --suite suite.json --output-dir ./figs/
 
 ## 모모 빠른 시작 가이드
 
-### 플로우차트 (가장 흔한 케이스)
+### 사용자가 명세서를 주면 → 이것만 실행
+
 ```python
 import sys
-sys.path.insert(0, '~/.openclaw/skills/patent-drawing/scripts')
+sys.path.insert(0, '/Users/cpagent/.openclaw/skills/patent-drawing/scripts')
 from patent_figure import quick_draw
 
-result = quick_draw("""
-S100: 시작
-S200: 데이터 수집
-S300: 처리
-S400: 결과 출력
-S500: 종료
-""", '/tmp/fig1.png', fig_label='FIG. 1')
+result = quick_draw(명세서_텍스트, '/tmp/fig1.png')
+# diagram_type='auto' 기본값 → 자동으로 타입 감지
+print(f"감지된 도면 타입: {result['detected_type']}")
+print(f"판단 근거: {result['detection_reason']}")
+print(f"신뢰도: {result['detection_confidence']:.2f}")
 # 생성 후 image() 도구로 비전 검증 권장
+```
+
+### 도면 타입 자동 감지 기준
+
+| 도면 타입 | 감지 키워드/패턴 | 예시 명세서 |
+|-----------|-----------------|-------------|
+| 플로우차트 | S100, S200 단계 | "S100: 로그인 요청..." |
+| 시퀀스 | Actor 간 메시지, HTTP, 요청/응답 | "User → Server: POST /login" |
+| 상태 | 상태, 전이, IDLE/ACTIVE | "IDLE 상태에서 이벤트 발생 시..." |
+| 계층 | Layer, 계층, 티어 | "Application Layer 위에..." |
+| 타이밍 | CLK, 신호, HIGH/LOW | "CLK 신호 rising edge 시..." |
+| DFD | 데이터 흐름, 처리, 저장소 | "입력 데이터가 처리 모듈로..." |
+| ER | 엔티티, PK, 1:N 관계 | "User 엔티티는 Order와 1:N..." |
+| 하드웨어 | 칩, 회로, MCU, 버스 | "MCU에서 ADC를 통해..." |
+
+### 불확실할 때 모모가 물어보는 대화 흐름
+
+`detection_confidence < 0.75` 이면 사용자에게 확인:
+
+> "명세서를 분석한 결과 **[타입]** 도면이 적합해 보입니다. 맞나요?  
+> 아니라면 다음 중 선택해주세요: 플로우차트 / 시퀀스 / 상태 / 계층 / 타이밍 / DFD / ER / 하드웨어"
+
+그 후 사용자 선택 결과로 재실행:
+```python
+result = quick_draw(명세서_텍스트, '/tmp/fig1.png', diagram_type='sequence')
+```
+
+### 타입 직접 지정 (자동 감지 무시)
+
+```python
+result = quick_draw(spec, '/tmp/fig1.png', diagram_type='state')     # 상태 다이어그램
+result = quick_draw(spec, '/tmp/fig1.png', diagram_type='sequence')  # 시퀀스
+result = quick_draw(spec, '/tmp/fig1.png', diagram_type='layered')   # 계층 아키텍처
+result = quick_draw(spec, '/tmp/fig1.png', diagram_type='timing')    # 타이밍
+result = quick_draw(spec, '/tmp/fig1.png', diagram_type='flowchart') # 플로우차트 강제
 ```
 
 ### 스크립트 import 경로 (항상 이 패턴 사용)
@@ -361,10 +395,11 @@ import sys
 sys.path.insert(0, '/Users/cpagent/.openclaw/skills/patent-drawing/scripts')
 from patent_figure import PatentFigure, PatentSequence, quick_draw
 from patent_suite import PatentSuite
+from detect_type import detect_diagram_type  # 타입만 감지할 때
 ```
 
 ### 도면 생성 체크리스트
-1. `quick_draw()` 또는 클래스 직접 사용
-2. `render()` 후 콘솔 검증 출력 확인
+1. `quick_draw()` 실행 (diagram_type='auto' 기본값)
+2. `result['detection_confidence']` 확인 — 0.75 미만이면 사용자에게 확인
 3. `image()` 도구로 비전 검증
 4. ⚠ 경고 있으면 수정 후 재생성

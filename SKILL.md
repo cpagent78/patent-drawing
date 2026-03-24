@@ -720,7 +720,7 @@ python scripts/validate_uspto.py fig1.png -v
 
 ---
 
-## 현재 기능 목록 (v2.0 완성)
+## 현재 기능 목록 (v2.5 완성)
 
 | 기능 | 메서드 | 설명 |
 |---|---|---|
@@ -740,6 +740,189 @@ python scripts/validate_uspto.py fig1.png -v
 | **스타일 프리셋** | `preset()` | 'uspto'/'draft'/'presentation' |
 | **버스 토폴로지** | `bus()` | 가로 버스 + 다중 연결 |
 | **시퀀스 다이어그램** | `PatentSequence` | 행위자 + 메시지 시퀀스 |
+| **상태 다이어그램** | `PatentState` | UML 상태 머신 (초기/최종/self-loop) |
+| **하드웨어 블록** | `PatentHardware` | chip/mux/register/memory_array |
+| **레이어드 아키텍처** | `PatentLayered` | 수평 레이어 + 인터페이스 화살표 |
+| **타이밍 다이어그램** | `PatentTiming` | clock/data/X파형 + 마커 |
+| **데이터 플로우** | `PatentDFD` | external/process/store + 흐름 |
+| **ER 다이어그램** | `PatentER` | entity/relationship/cardinality |
 | **한글 폰트** | 자동 | Apple SD Gothic Neo 자동 감지 |
 | **EdgeRouter** | 자동 | Bezier 라운드, A* 장애물 회피 |
 | **USPTO 검증** | `validate_uspto.py` | PNG 규격 자동 리포트 |
+
+---
+
+## v2.5 신규 기능 (Research 11~13)
+
+### PatentState — 상태 다이어그램
+
+```python
+import sys
+sys.path.insert(0, '<skill_dir>/scripts')
+from patent_figure import PatentState
+
+fig = PatentState('FIG. 4')
+fig.state('IDLE',   '100\nIdle',    initial=True)
+fig.state('ACTIVE', '200\nActive')
+fig.state('DONE',   '300\nDone',    final=True)
+fig.transition('IDLE',   'ACTIVE', label='start()')
+fig.transition('ACTIVE', 'DONE',   label='finish()')
+fig.transition('ACTIVE', 'IDLE',   label='cancel()')
+fig.transition('ACTIVE', 'ACTIVE', label='heartbeat')  # self-loop
+fig.render('fig4_state.png')
+```
+
+- 방향: `direction='TB'` (기본) 또는 `'LR'`
+- `initial=True`: UML 채운 원 → 화살표
+- `final=True`: bull's-eye 이중 원
+- self-loop: 같은 상태 전이 자동 처리
+- 양방향 전이: arc 곡선으로 자동 구분
+
+### PatentHardware — 하드웨어 블록 다이어그램
+
+```python
+from patent_figure import PatentHardware
+
+fig = PatentHardware('FIG. 2')
+cpu   = fig.chip('CPU', '610\nALU', cx=2.5, cy=7.5,
+                  n_pins_left=4, n_pins_right=4)
+cache = fig.register('CACHE', '620\nCache', cx=2.5, cy=5.5, cells=8)
+mux   = fig.mux('MUX', '630\nMUX', cx=5.0, cy=7.5, direction='right')
+mem   = fig.memory_array('MEM', '640\nMemory', cx=5.0, cy=5.5,
+                           rows=4, cols=6)
+blk   = fig.block('BUS', '650\nBus', cx=2.5, cy=4.0)
+fig.connect(cpu, cache, label='data')
+fig.connect(mux, mem, bidir=True)
+fig.render('fig2_hw.png')
+```
+
+도형 종류:
+- `chip(id, text, cx, cy, n_pins_left, n_pins_right)` — IC 칩 (핀 포함)
+- `mux(id, text, cx, cy, direction)` — 사다리꼴 멀티플렉서
+- `register(id, text, cx, cy, cells, cell_w, cell_h)` — 레지스터 셀 배열
+- `memory_array(id, text, cx, cy, rows, cols, cell_w, cell_h)` — 메모리 행렬
+- `block(id, text, cx, cy, w, h)` — 일반 블록
+- `connect(src, dst, label, bidir)` — 연결 화살표
+
+### PatentLayered — 레이어드 아키텍처
+
+```python
+from patent_figure import PatentLayered
+
+fig = PatentLayered('FIG. 2')
+fig.layer('Application Layer', ['Browser', 'Mobile App', 'API Client'], ref='100')
+fig.layer('Service Layer',     ['Auth', 'Business Logic', 'Cache'],     ref='200')
+fig.layer('Data Layer',        ['PostgreSQL', 'Redis', 'S3'],           ref='300')
+fig.interface('100', '200', label='REST API')
+fig.interface('200', '300', label='ORM/Query')
+fig.render('fig2_layered.png')
+```
+
+### PatentTiming — 타이밍 다이어그램
+
+```python
+from patent_figure import PatentTiming
+
+fig = PatentTiming('FIG. 5')
+fig.signal('CLK',   '100', wave='clock', period=1.0)
+fig.signal('DATA',  '200', wave=[0,0,1,1,0,1,0,0], labels=['D0','D1'])
+fig.signal('VALID', '300', wave=[0,1,1,1,1,1,0,0])
+fig.signal('X_SIG', '400', wave=[0,'X','X',1,0,0,1,0])  # X=don't care
+fig.marker(t=2.0, label='T_setup')
+fig.marker(t=6.0, label='T_hold')
+fig.render('fig5_timing.png')
+```
+
+- `wave='clock'`: 자동 square wave
+- `wave=[0,1,'X',...]`: 커스텀 파형 (X=don't care)
+- `marker(t, label)`: 수직 점선 마커
+
+### PatentDFD — 데이터 플로우 다이어그램
+
+```python
+from patent_figure import PatentDFD
+
+fig = PatentDFD('FIG. 3')
+fig.external('USER',  '100\nUser')              # 사각형
+fig.process( 'AUTH',  '200\nAuthentication')     # 타원
+fig.store(   'DB',    '300\nUser Database')      # 열린 사각형
+fig.flow('USER', 'AUTH', label='credentials')
+fig.flow('AUTH', 'DB',   label='lookup')
+fig.flow('DB',   'AUTH', label='user record')
+fig.render('fig3_dfd.png')
+```
+
+위치를 지정하려면 `cx`, `cy` 파라미터 추가:
+```python
+fig.external('USER', '100\nUser', cx=2.0, cy=8.0)
+```
+
+### PatentER — ER 다이어그램
+
+```python
+from patent_figure import PatentER
+
+fig = PatentER('FIG. 6')
+fig.entity('USER',    '100\nUser',
+           attrs=['user_id (PK)', 'username', 'email'])
+fig.entity('ORDER',   '200\nOrder',
+           attrs=['order_id (PK)', 'date', 'total'])
+fig.entity('PRODUCT', '300\nProduct',
+           attrs=['product_id (PK)', 'name', 'price'])
+fig.relationship('USER',  'ORDER',   '1', 'N', label='places')
+fig.relationship('ORDER', 'PRODUCT', 'N', 'M', label='contains')
+fig.render('fig6_er.png')
+```
+
+- `attrs`: 속성 목록. `'(PK)'` 포함 시 PK 밑줄 자동 표시
+- `relationship(e1, e2, card1, card2, label)`: 카디널리티 표기
+
+### quick_draw() 다이어그램 타입 확장
+
+```python
+from patent_figure import quick_draw
+
+# 상태 다이어그램
+spec = """
+IDLE: 100 Idle [initial]
+ACTIVE: 200 Active
+DONE: 300 Done [final]
+IDLE -> ACTIVE: start()
+ACTIVE -> DONE: finish()
+"""
+result = quick_draw(spec, 'fig.png', diagram_type='state')
+
+# 시퀀스 다이어그램
+spec = """
+actor C: Client
+actor S: Server
+C -> S: request
+S <- C: response
+"""
+result = quick_draw(spec, 'fig.png', diagram_type='sequence')
+
+# 레이어드 다이어그램
+spec = """
+100: App Layer | Browser, Mobile
+200: Service Layer | Auth, Orders
+INTERFACE: 100 -> 200 REST API
+"""
+result = quick_draw(spec, 'fig.png', diagram_type='layered')
+
+# 타이밍 다이어그램
+spec = """
+100: CLK clock
+200: DATA 0,1,1,0,1,0
+MARKER: t=2.0 T1
+"""
+result = quick_draw(spec, 'fig.png', diagram_type='timing')
+```
+
+지원 diagram_type 목록:
+| 값 | 엔진 | 설명 |
+|---|---|---|
+| `'flowchart'` (기본) | `PatentFigure` | 플로우차트/블록 다이어그램 |
+| `'state'` | `PatentState` | 상태 머신 |
+| `'sequence'` | `PatentSequence` | 시퀀스 다이어그램 |
+| `'layered'` | `PatentLayered` | 레이어드 아키텍처 |
+| `'timing'` | `PatentTiming` | 타이밍 다이어그램 |

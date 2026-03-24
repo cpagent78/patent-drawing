@@ -2323,7 +2323,8 @@ def quick_draw(spec_text: str, output_path: str,
                preset: str = 'uspto',
                lang: str = 'auto',
                direction: str = 'TB',
-               fig_label: str = 'FIG. 1') -> dict:
+               fig_label: str = 'FIG. 1',
+               diagram_type: str = 'flowchart') -> dict:
     """
     명세서 텍스트 → USPTO 규격 PNG 한방에 생성.
     특허방 모모(patent-drawing 스킬 사용자)용 고수준 API.
@@ -2363,6 +2364,20 @@ def quick_draw(spec_text: str, output_path: str,
     import time
 
     t0 = time.time()
+
+    # ── 0. Route to specialized diagram type if requested ─────────────────────
+    # diagram_type: 'flowchart' (default), 'state', 'sequence', 'layered',
+    #               'timing', 'dfd', 'er', 'hardware'
+    # For non-flowchart types, parse spec in a simplified manner.
+
+    if diagram_type == 'state':
+        return _quick_draw_state(spec_text, output_path, fig_label, t0)
+    elif diagram_type == 'sequence':
+        return _quick_draw_sequence(spec_text, output_path, fig_label, t0)
+    elif diagram_type == 'layered':
+        return _quick_draw_layered(spec_text, output_path, fig_label, t0)
+    elif diagram_type == 'timing':
+        return _quick_draw_timing(spec_text, output_path, fig_label, t0)
 
     # ── 1. Parse spec → PatentFigure ──────────────────────────────────────────
     fig = PatentFigure.from_spec(fig_label, spec_text, direction=direction)
@@ -4083,9 +4098,7 @@ class PatentER:
                 is_pk = '(PK)' in attr or '(pk)' in attr
                 ax.text(cx, row_cy, attr,
                         ha='center', va='center',
-                        fontsize=self.FS_ATTR, zorder=12,
-                        # PK: underline via textprops
-                        **({'textprops': {'fontweight': 'normal'}} if not is_pk else {}))
+                        fontsize=self.FS_ATTR, zorder=12)
                 if is_pk:
                     # Draw underline manually
                     txt_w = w * 0.65
@@ -4193,3 +4206,198 @@ class PatentER:
         _plt.close(fig)
         return output_path
 
+
+
+# ── quick_draw() helper functions for new diagram types ──────────────────────
+
+def _quick_draw_state(spec_text: str, output_path: str,
+                      fig_label: str, t0: float) -> dict:
+    """Parse simple state spec and render with PatentState.
+
+    Spec format:
+        STATE_ID: State Name [initial] [final]
+        STATE_ID -> STATE_ID2: label
+    """
+    import os, time
+    fig = PatentState(fig_label)
+    lines = [l.strip() for l in spec_text.strip().splitlines() if l.strip()]
+    state_count = 0
+    for line in lines:
+        if '->' in line:
+            # Transition: S1 -> S2: label
+            parts = line.split('->', 1)
+            src = parts[0].strip()
+            rest = parts[1].strip()
+            if ':' in rest:
+                dst, label = rest.split(':', 1)
+                dst = dst.strip()
+                label = label.strip()
+            else:
+                dst = rest.strip()
+                label = ''
+            fig.transition(src, dst, label=label)
+        elif ':' in line:
+            # State definition: ID: name [initial] [final]
+            id_part, text_part = line.split(':', 1)
+            sid = id_part.strip()
+            text = text_part.strip()
+            is_initial = '[initial]' in text.lower()
+            is_final   = '[final]'   in text.lower()
+            text = text.replace('[initial]', '').replace('[Initial]', '')
+            text = text.replace('[final]',   '').replace('[Final]',   '').strip()
+            fig.state(sid, text, initial=is_initial, final=is_final)
+            state_count += 1
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    fig.render(output_path)
+    pages = [output_path]
+    issues = _validate_output_files(pages)
+    return {
+        'pages': pages, 'node_count': state_count, 'warnings': [],
+        'validation': {'passed': len(issues) == 0, 'issues': issues},
+        'elapsed_sec': round(time.time() - t0, 2),
+    }
+
+
+def _quick_draw_sequence(spec_text: str, output_path: str,
+                         fig_label: str, t0: float) -> dict:
+    """Parse simple sequence spec and render with PatentSequence.
+
+    Spec format:
+        actor ID: Name
+        ID -> ID2: message
+        ID <- ID2: return message
+    """
+    import os, time
+    fig = PatentSequence(fig_label)
+    lines = [l.strip() for l in spec_text.strip().splitlines() if l.strip()]
+    msg_count = 0
+    for line in lines:
+        if line.lower().startswith('actor '):
+            rest = line[6:].strip()
+            if ':' in rest:
+                aid, name = rest.split(':', 1)
+                fig.actor(name.strip(), aid.strip())
+        elif '<-' in line or '->' in line:
+            is_return = '<-' in line
+            sep = '<-' if is_return else '->'
+            parts = line.split(sep, 1)
+            src = parts[0].strip()
+            rest = parts[1].strip()
+            if ':' in rest:
+                dst, label = rest.split(':', 1)
+                dst = dst.strip()
+                label = label.strip()
+            else:
+                dst = rest.strip()
+                label = ''
+            if is_return:
+                src, dst = dst, src  # swap for return
+            fig.message(src, dst, label=label, return_msg=is_return)
+            msg_count += 1
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    fig.render(output_path)
+    pages = [output_path]
+    issues = _validate_output_files(pages)
+    return {
+        'pages': pages, 'node_count': msg_count, 'warnings': [],
+        'validation': {'passed': len(issues) == 0, 'issues': issues},
+        'elapsed_sec': round(time.time() - t0, 2),
+    }
+
+
+def _quick_draw_layered(spec_text: str, output_path: str,
+                        fig_label: str, t0: float) -> dict:
+    """Parse simple layered spec and render with PatentLayered.
+
+    Spec format:
+        LAYER_REF: Layer Name | comp1, comp2, comp3
+        INTERFACE: REF1 -> REF2 label
+    """
+    import os, time
+    fig = PatentLayered(fig_label)
+    lines = [l.strip() for l in spec_text.strip().splitlines() if l.strip()]
+    layer_count = 0
+    for line in lines:
+        if line.upper().startswith('INTERFACE:'):
+            rest = line[10:].strip()
+            if '->' in rest:
+                parts = rest.split('->', 1)
+                ref1 = parts[0].strip()
+                parts2 = parts[1].strip()
+                if ' ' in parts2:
+                    ref2, label = parts2.split(' ', 1)
+                else:
+                    ref2, label = parts2, ''
+                fig.interface(ref1.strip(), ref2.strip(), label=label.strip())
+        elif ':' in line and '|' in line:
+            ref_name, comps_str = line.split('|', 1)
+            if ':' in ref_name:
+                ref, name = ref_name.split(':', 1)
+                comps = [c.strip() for c in comps_str.split(',')]
+                fig.layer(name.strip(), comps, ref=ref.strip())
+                layer_count += 1
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    fig.render(output_path)
+    pages = [output_path]
+    issues = _validate_output_files(pages)
+    return {
+        'pages': pages, 'node_count': layer_count, 'warnings': [],
+        'validation': {'passed': len(issues) == 0, 'issues': issues},
+        'elapsed_sec': round(time.time() - t0, 2),
+    }
+
+
+def _quick_draw_timing(spec_text: str, output_path: str,
+                       fig_label: str, t0: float) -> dict:
+    """Parse simple timing spec and render with PatentTiming.
+
+    Spec format:
+        SIGNAL_REF: signal_name [clock|0,1,0,1,...]
+        MARKER: t=2.0 label
+    """
+    import os, time
+    fig = PatentTiming(fig_label)
+    lines = [l.strip() for l in spec_text.strip().splitlines() if l.strip()]
+    sig_count = 0
+    for line in lines:
+        if line.upper().startswith('MARKER:'):
+            rest = line[7:].strip()
+            if 't=' in rest:
+                parts = rest.split(' ', 1)
+                t_str = parts[0].replace('t=', '')
+                label = parts[1] if len(parts) > 1 else ''
+                try:
+                    fig.marker(float(t_str), label=label.strip())
+                except ValueError:
+                    pass
+        elif ':' in line:
+            parts = line.split(':', 1)
+            ref = parts[0].strip()
+            rest = parts[1].strip()
+            # rest: "name clock" or "name 0,1,0,1..."
+            tokens = rest.split(' ', 1)
+            name = tokens[0]
+            wave_str = tokens[1] if len(tokens) > 1 else 'clock'
+            if wave_str.strip().lower() == 'clock':
+                fig.signal(name, ref, wave='clock')
+            else:
+                try:
+                    wave = [int(x.strip()) if x.strip() not in ('X','x') else 'X'
+                            for x in wave_str.split(',')]
+                    fig.signal(name, ref, wave=wave)
+                except Exception:
+                    fig.signal(name, ref, wave='clock')
+            sig_count += 1
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    fig.render(output_path)
+    pages = [output_path]
+    issues = _validate_output_files(pages)
+    return {
+        'pages': pages, 'node_count': sig_count, 'warnings': [],
+        'validation': {'passed': len(issues) == 0, 'issues': issues},
+        'elapsed_sec': round(time.time() - t0, 2),
+    }

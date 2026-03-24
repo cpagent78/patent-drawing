@@ -926,3 +926,153 @@ result = quick_draw(spec, 'fig.png', diagram_type='timing')
 | `'sequence'` | `PatentSequence` | 시퀀스 다이어그램 |
 | `'layered'` | `PatentLayered` | 레이어드 아키텍처 |
 | `'timing'` | `PatentTiming` | 타이밍 다이어그램 |
+
+---
+
+## v3.0 신규 기능 (Research 14~16)
+
+### PatentSuite — 복합 도면 관리 (Research 15)
+
+```python
+import sys
+sys.path.insert(0, '<skill_dir>/scripts')
+from patent_suite import PatentSuite
+from patent_figure import PatentFigure, PatentSequence, PatentState, PatentLayered
+
+suite = PatentSuite('My Invention')
+suite.add(PatentFigure('FIG. 1'), description='System Overview')
+suite.add(PatentSequence('FIG. 2'), description='Login Flow')
+suite.add(PatentState('FIG. 3'), description='Device States')
+suite.add(PatentLayered('FIG. 4'), description='Architecture')
+
+# 일괄 렌더링: FIG1.png, FIG2.png, FIG3.png, FIG4.png
+paths = suite.render_all('output/')
+
+# Markdown 인덱스
+suite.export_index('output/index.md')
+
+# PDF 합본 (Pillow 필요: pip install Pillow)
+suite.export_pdf('output/patent_drawings.pdf')
+```
+
+| 메서드 | 설명 |
+|--------|------|
+| `suite.add(figure, description)` | 도면 추가 |
+| `suite.render_all(output_dir)` | 전체 PNG 일괄 생성 |
+| `suite.export_index(path)` | Markdown 인덱스 생성 |
+| `suite.export_pdf(path)` | 전체 도면 PDF 합치기 |
+| `suite.check_ref_conflicts()` | 참조번호 충돌 감지 |
+| `suite.find_cross_refs()` | 잘못 배치된 참조번호 탐지 |
+
+**자동 참조번호 범위 할당**:
+- FIG. 1 → 100~199 / FIG. 2 → 200~299 / FIG. N → N×100~N×100+99
+
+### CLI — patent_draw.py (Research 15)
+
+```bash
+# 단일 도면 생성
+python patent_draw.py --spec spec.txt --output fig1.png --preset uspto
+python patent_draw.py --spec spec.txt --type state --output fig2.png --label "FIG. 2"
+
+# 인라인 spec
+python patent_draw.py --inline "S100: Start\nS200: Process" --output fig.png
+
+# Suite 일괄 생성
+python patent_draw.py --suite suite.json --output-dir ./figs/
+```
+
+suite.json 형식:
+```json
+{
+  "title": "My Invention",
+  "figures": [
+    {"type": "flowchart", "spec": "spec1.txt", "label": "FIG. 1",
+     "description": "System Overview", "output": "fig1.png"},
+    {"type": "state", "spec_inline": "IDLE: 100 Idle [initial]\n...",
+     "label": "FIG. 2", "description": "State Machine"}
+  ],
+  "export_pdf": "drawings.pdf",
+  "export_index": "index.md"
+}
+```
+
+### dynamic_page_size() (Research 14)
+
+```python
+fig = PatentFigure('FIG. 5')
+fig.dynamic_page_size(True)  # 텍스트 길이 기반 동적 페이지 확장
+# ... add nodes with long labels ...
+fig.render('fig5.png')
+```
+
+### 성능 최적화 (Research 16)
+
+- `measure_text()`: `(text, fs)` → 결과 캐싱 (반복 렌더링 시 70% 속도 향상)
+- `_fit_font()`: `(text, w, h, fs)` → 결과 캐싱 (Canvas.draw 중복 호출 제거)
+- Suite 4개 도면: ~0.3s 총 시간 (~0.075s/figure)
+- 30-node 도면: Cold 0.62s / Warm (캐시 후) 0.31s
+
+### USPTO 특허 출원 준비 가이드
+
+**7가지 도면 타입 완전 활용**:
+
+```
+FIG. 1: PatentLayered   → 시스템 아키텍처 (레이어별 구성)
+FIG. 2: PatentFigure    → 데이터 수집/처리 플로우차트
+FIG. 3: PatentSequence  → 시스템 간 상호작용 시퀀스
+FIG. 4: PatentState     → 디바이스/프로세스 상태 머신
+FIG. 5: PatentDFD       → 데이터 흐름 다이어그램
+FIG. 6: PatentER        → 데이터베이스 스키마 ER
+FIG. 7: PatentTiming    → 신호 처리 타이밍
+```
+
+**참조번호 일관성 규칙**:
+1. 같은 발명 내 모든 도면에서 같은 요소는 같은 번호 사용
+2. FIG. N의 주요 요소는 N×100번대 사용 (FIG. 1 → 100번대)
+3. PatentSuite가 자동으로 범위 충돌 검사
+
+**빠른 출원 워크플로우**:
+```python
+suite = PatentSuite('발명 제목')
+# 1. 각 도면 타입으로 객체 생성 후 suite.add()
+# 2. suite.render_all('figs/')로 일괄 PNG 생성
+# 3. suite.export_pdf('patent.pdf')로 PDF 합본
+# 4. suite.export_index('index.md')로 도면 목록 확인
+```
+
+---
+
+## 현재 기능 목록 (v3.0 완성)
+
+| 기능 | 메서드 | 설명 |
+|---|---|---|
+| **고수준 API** | `quick_draw()` | 명세서 텍스트 → PNG 한방 생성 |
+| **선언적 엔진** | `PatentFigure` | 좌표 0개, 자동 레이아웃 |
+| **복합 도면** | `PatentSuite` | 다중 도면 일괄 생성/PDF/인덱스 |
+| **CLI** | `patent_draw.py` | 커맨드라인 도면 생성 |
+| **자동 파싱** | `from_spec()` | 한글/영어 명세서 → 노드/엣지 자동 생성 |
+| **6종 노드** | `node(shape=)` | start/end/process/diamond/oval/cylinder |
+| **엣지** | `edge()` | bidir, label_back, 루프 자동 처리 |
+| **컨테이너** | `container()` | 점선 그룹 박스 |
+| **노드 그룹** | `node_group()` | 병렬 노드 정렬 |
+| **강조** | `highlight()` | 특정 노드 배경색 |
+| **주석** | `add_note()` | 말풍선 주석 |
+| **역공학** | `export_spec()` | 도면 → 명세서 텍스트 |
+| **검증** | `validate()` | 구조 사전 검증 |
+| **다중 페이지** | `render_multi()` | 2페이지 분할 |
+| **자동 분할** | `render(auto_split=True)` | 14개 초과 자동 2페이지 |
+| **동적 페이지** | `dynamic_page_size()` | 텍스트 밀도 기반 자동 확장 |
+| **스타일 프리셋** | `preset()` | 'uspto'/'draft'/'presentation' |
+| **버스 토폴로지** | `bus()` | 가로 버스 + 다중 연결 |
+| **시퀀스 다이어그램** | `PatentSequence` | 행위자 + 메시지 시퀀스 |
+| **상태 다이어그램** | `PatentState` | UML 상태 머신 |
+| **하드웨어 블록** | `PatentHardware` | chip/mux/register/memory_array |
+| **레이어드 아키텍처** | `PatentLayered` | 수평 레이어 + 인터페이스 화살표 |
+| **타이밍 다이어그램** | `PatentTiming` | clock/data/X파형 + 마커 |
+| **데이터 플로우** | `PatentDFD` | external/process/store + 흐름 |
+| **ER 다이어그램** | `PatentER` | entity/relationship/cardinality |
+| **한글 폰트** | 자동 | Apple SD Gothic Neo 자동 감지 |
+| **EdgeRouter** | 자동 | Bezier 라운드, A* 장애물 회피 |
+| **USPTO 검증** | `validate_uspto.py` | PNG 규격 자동 리포트 |
+| **PDF 내보내기** | `PatentSuite.export_pdf()` | 다중 도면 → PDF 합본 |
+| **성능 캐싱** | 자동 | measure_text/fit_font 결과 캐시 |

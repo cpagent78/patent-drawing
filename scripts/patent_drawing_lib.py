@@ -1173,12 +1173,22 @@ class Drawing:
                 new_cmds.append(cmd)
         self._cmds = new_cmds
 
+    # Research 16 Phase 4: measure_text cache to avoid repeated canvas.draw() calls
+    _MEASURE_TEXT_CACHE: dict = {}
+
     def measure_text(self, text, fs=None) -> tuple:
         """
         텍스트를 실제 렌더링하여 크기(인치)를 반환.
         반환: (width_in, height_in)
+        
+        Research 16 optimization: cache by (text, fs) to avoid redundant renders.
         """
         fs = fs or FS_BODY
+        cache_key = (text, float(fs))
+        cached = Drawing._MEASURE_TEXT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
         # visible=True로 렌더링 후 크기 측정, 이후 제거
         t = self.ax.text(0, 0, text, fontsize=fs, fontweight=FW,
                          multialignment='center',
@@ -1200,7 +1210,10 @@ class Drawing:
             tw = max_chars * fs * 0.6 / 72
             th = len(lines) * fs * 1.2 / 72
         t.remove()
-        return (tw, th)
+
+        result = (tw, th)
+        Drawing._MEASURE_TEXT_CACHE[cache_key] = result
+        return result
 
     def autobox(self, x, y, text, fs=None, pad_x=0.20, pad_y=0.14) -> BoxRef:
         """
@@ -3151,8 +3164,21 @@ class Drawing:
         else:  # box (기본)
             return w - 0.18, h - 0.14, 0, 0
 
+    # Research 16 Phase 4: _fit_font result cache to avoid redundant canvas.draw() calls
+    _FIT_FONT_CACHE: dict = {}
+
     def _fit_font(self, text, box_w_in, box_h_in, fs_start):
-        """박스 크기에 맞게 폰트 자동 축소. 최소 8pt."""
+        """박스 크기에 맞게 폰트 자동 축소. 최소 8pt.
+        
+        Research 16 optimization: cache results keyed by (text, box_w_in, box_h_in, fs_start)
+        to avoid repeated expensive canvas.draw() calls for identical inputs.
+        """
+        # Round dimensions to 3 decimal places to improve cache hit rate
+        cache_key = (text, round(box_w_in, 3), round(box_h_in, 3), float(fs_start))
+        cached = Drawing._FIT_FONT_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
         box_w_px = box_w_in * self.fig.dpi
         box_h_px = box_h_in * self.fig.dpi
         fs = float(fs_start)
@@ -3170,6 +3196,8 @@ class Drawing:
             if tw <= box_w_px*0.88 and th <= box_h_px*0.85:
                 break
             fs = max(8.0, fs*0.88)
+
+        Drawing._FIT_FONT_CACHE[cache_key] = fs
         return fs
 
     # ── 검증 ──────────────────────────────────────────────────────────────────

@@ -570,17 +570,26 @@ class SmartLayout:
 
         # ── Draw feedback edges (dashed, separated lanes) ─────────────────────
         if feedback_edges:
-            # Base x channel: just inside the feedback reserve area
-            # Lane 0 is outermost (leftmost), increasing lanes go right
-            ch_x_base = self.content_left + 0.15
+            # Compute the leftmost box edge across all nodes to ensure channels
+            # are placed clearly outside (to the left of) any box
+            all_box_lefts = [info['box_ref'].left
+                             for info in self._nodes.values()
+                             if info['box_ref'] is not None]
+            global_left = min(all_box_lefts) if all_box_lefts else self.content_left
+            # Lane 0 is outermost (leftmost), each successive lane is closer
+            # to the boxes but still clearly outside the leftmost edge
+            lane_gap = 0.30
+            # Reserve enough space: n_feedback * lane_gap + 0.50 clearance minimum
+            ch_x_base = global_left - 0.50 - (len(feedback_edges) - 1) * lane_gap
             for lane_idx, (idx, e) in enumerate(feedback_edges):
                 sb = self._nodes[e['src']]['box_ref']
                 db = self._nodes[e['dst']]['box_ref']
                 if sb is None or db is None:
                     continue
                 lbl = e['label'] or ''
-                ch_x = ch_x_base + lane_idx * self.feedback_lane_gap
-                # Dashed feedback: src.left → ch_x → db.left (dashed line)
+                # Lane 0 = outermost, lane 1 = closer to boxes (but still outside)
+                ch_x = ch_x_base + lane_idx * lane_gap
+                # Dashed feedback: src.left → ch_x → dst.left (dashed line)
                 d.arrow_route([
                     sb.left_mid(),
                     ('left_to', ch_x),

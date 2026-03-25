@@ -1,8 +1,17 @@
 """
-patent_drawing_lib.py  v8.0
+patent_drawing_lib.py  v9.0
 USPTO-Compliant Patent Drawing Library
 
 변경 이력:
+  v9.0  화살표 품질 자동화 3종 추가:
+        - arrowhead clearance: shrinkB=2pt — 화살촉이 박스 테두리에 묻히지 않음
+        - arrival point spreading: arrow_v/arrow_h에서 같은 박스 같은 면으로
+          여러 화살표가 도착 시 자동 균등 분산 (dst_offset 수동 파라미터도 지원)
+        - channel auto-avoidance: _render_route 내 수직 채널 x가 박스 테두리에
+          너무 가까우면 자동 오프셋 (CHANNEL_CLEARANCE=0.15")
+        - save() 전 _resolve_arrow_v_h()로 arrow_v/arrow_h → route 변환 (2-pass 유지)
+        상수: ARROWHEAD_CLEARANCE_PT, ARRIVAL_SPREAD_MARGIN, CHANNEL_CLEARANCE
+
   v8.0  learn/new-shapes 브랜치 — 5개 신규 패턴 추가:
         - sequence_diagram(): UML 시퀀스 다이어그램 (행위자 박스 + lifeline + 메시지 화살표)
         - swimlane_columns(): 수직 스윔레인 (레인 헤더 + 프로세스 박스)
@@ -124,6 +133,11 @@ Z_BOX_TEXT  = 12
 Z_ARR_LABEL = 20
 Z_SEC_LABEL = 21
 Z_FIG_LABEL = 22
+
+# ── 화살표 품질 상수 (v9.0) ───────────────────────────────────────────────────
+ARROWHEAD_CLEARANCE_PT = 2    # shrinkB (points) — 화살촉이 박스 테두리에 묻히지 않도록
+ARRIVAL_SPREAD_MARGIN  = 0.15  # 박스 가장자리에서 최소 여백 (inches)
+CHANNEL_CLEARANCE      = 0.15  # 수직 채널과 박스 테두리 최소 거리 (inches)
 
 
 def _normalize_node_text(text: str) -> str:
@@ -304,6 +318,8 @@ class Drawing:
         self._terminal_boxes = set()
         self._nodes: list['NodeDef'] = []
         self._edges: list[tuple] = []
+        # v9.0: 화살표 품질 레지스트리
+        self._arrival_registry: dict = {}   # {(box_id, side): [cmd_indices...]}
 
         if orientation == 'landscape':
             self.page_w, self.page_h = PAGE_H, PAGE_W  # 11.0 x 8.5
@@ -1579,21 +1595,33 @@ class Drawing:
 
     # ── 화살표 ────────────────────────────────────────────────────────────────
 
-    def arrow_v(self, src_box: BoxRef, dst_box: BoxRef, label=""):
-        """수직 단방향 화살표. dst 위치에 따라 위/아래 자동 선택 (관통 방지)."""
-        if dst_box.cy <= src_box.cy:
-            pts = [src_box.bot_mid(), dst_box.top_mid()]
-        else:
-            pts = [src_box.top_mid(), dst_box.bot_mid()]
-        self._cmds.append(('route', pts, label, None, None))
+    def arrow_v(self, src_box: BoxRef, dst_box: BoxRef, label="",
+                dst_offset: float = 0.0):
+        """수직 단방향 화살표. dst 위치에 따라 위/아래 자동 선택 (관통 방지).
 
-    def arrow_h(self, src_box: BoxRef, dst_box: BoxRef, label=""):
-        """수평 단방향 화살표. dst 위치에 따라 좌/우 자동 선택 (관통 방지)."""
-        if dst_box.cx >= src_box.cx:
-            pts = [src_box.right_mid(), dst_box.left_mid()]
-        else:
-            pts = [src_box.left_mid(), dst_box.right_mid()]
-        self._cmds.append(('route', pts, label, None, None))
+        dst_offset: 도착점을 박스 중심에서 좌우로 이동 (inches).
+                    양수 = 오른쪽, 음수 = 왼쪽.
+                    0 (기본)이면 자동 분산 로직 적용.
+        """
+        side = 'top' if dst_box.cy > src_box.cy else 'bottom'
+        idx = len(self._cmds)
+        key = (id(dst_box), side)
+        self._arrival_registry.setdefault(key, []).append(idx)
+        self._cmds.append(('arrow_v', src_box, dst_box, label, dst_offset, side))
+
+    def arrow_h(self, src_box: BoxRef, dst_box: BoxRef, label="",
+                dst_offset: float = 0.0):
+        """수평 단방향 화살표. dst 위치에 따라 좌/우 자동 선택 (관통 방지).
+
+        dst_offset: 도착점을 박스 중심에서 상하로 이동 (inches).
+                    양수 = 위, 음수 = 아래.
+                    0 (기본)이면 자동 분산 로직 적용.
+        """
+        side = 'left' if dst_box.cx >= src_box.cx else 'right'
+        idx = len(self._cmds)
+        key = (id(dst_box), side)
+        self._arrival_registry.setdefault(key, []).append(idx)
+        self._cmds.append(('arrow_h', src_box, dst_box, label, dst_offset, side))
 
     def arrow_bidir(self, box_a: BoxRef, box_b: BoxRef, side='h'):
         """
@@ -2136,6 +2164,8 @@ class Drawing:
     # ── 렌더링 ────────────────────────────────────────────────────────────────
 
     def save(self):
+        # v9.0: arrow_v/arrow_h 명령을 route 명령으로 변환 (도착점 자동 분산 포함)
+        self._resolve_arrow_v_h()
         # 2-pass 렌더링: 1차에서 실측 → center shift → 2차 최종 렌더링
         bnd_rect = self._render_all()
 
@@ -3011,7 +3041,8 @@ class Drawing:
                         solid_capstyle='butt', zorder=Z_ARROW)
             # 마지막 세그먼트 → 화살촉
             ax.annotate('', xy=pts[-1], xytext=pts[-2],
-                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
+                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0,
+                                       shrinkB=ARROWHEAD_CLEARANCE_PT,
                                        lw=LW_ARR, mutation_scale=12),
                         zorder=Z_ARROWHEAD)
 
@@ -3030,7 +3061,9 @@ class Drawing:
         """양방향 화살촉 (직선 또는 elbow)."""
         if len(pts) == 2:
             ax.annotate('', xy=pts[1], xytext=pts[0],
-                        arrowprops=dict(arrowstyle='<->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
+                        arrowprops=dict(arrowstyle='<->', color=BOX_EDGE,
+                                       shrinkA=ARROWHEAD_CLEARANCE_PT,
+                                       shrinkB=ARROWHEAD_CLEARANCE_PT,
                                        lw=LW_ARR, mutation_scale=12),
                         zorder=Z_ARROWHEAD)
         else:
@@ -3040,15 +3073,19 @@ class Drawing:
                         color=BOX_EDGE, lw=LW_ARR,
                         solid_capstyle='butt', zorder=Z_ARROW)
             ax.annotate('', xy=pts[0], xytext=pts[1],
-                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
+                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0,
+                                       shrinkB=ARROWHEAD_CLEARANCE_PT,
                                        lw=LW_ARR, mutation_scale=12),
                         zorder=Z_ARROWHEAD)
             ax.annotate('', xy=pts[-1], xytext=pts[-2],
-                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
+                        arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0,
+                                       shrinkB=ARROWHEAD_CLEARANCE_PT,
                                        lw=LW_ARR, mutation_scale=12),
                         zorder=Z_ARROWHEAD)
 
     def _render_route(self, ax, pts, lbl, lpos, ldx, lha, ls='-'):
+        # v9.0: 수직 채널 자동 회피
+        pts = self._apply_channel_avoidance(pts)
         n = len(pts)
         if n < 2:
             return
@@ -3071,7 +3108,8 @@ class Drawing:
                     color=BOX_EDGE, lw=LW_ARR, linestyle=ls,
                     solid_capstyle='round', zorder=Z_ARROW)
         ax.annotate('', xy=pts[-1], xytext=pts[-2],
-                    arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0, shrinkB=0,
+                    arrowprops=dict(arrowstyle='->', color=BOX_EDGE, shrinkA=0,
+                                   shrinkB=ARROWHEAD_CLEARANCE_PT,
                                    lw=LW_ARR, linestyle=ls, mutation_scale=12),
                     zorder=Z_ARROWHEAD)
         if lbl:
@@ -3139,6 +3177,119 @@ class Drawing:
             if abs(p[0]-deduped[-1][0]) > 1e-4 or abs(p[1]-deduped[-1][1]) > 1e-4:
                 deduped.append(p)
         return deduped
+
+    # ── v9.0: 화살표 품질 헬퍼 ─────────────────────────────────────────────────
+
+    def _spread_arrival(self, box_ref: BoxRef, side: str, count: int, index: int):
+        """
+        box_ref의 side 면에 count개 화살표가 도착할 때, index번째의 도착 좌표 반환.
+        count == 1 이면 중심(mid) 그대로. count >= 2 이면 균등 분산.
+        """
+        margin = ARRIVAL_SPREAD_MARGIN
+        if side in ('top', 'bottom'):
+            if count == 1:
+                x = box_ref.cx
+            else:
+                avail = max((box_ref.right - box_ref.left) - 2 * margin, 0)
+                step = avail / (count + 1) if count > 1 else 0
+                x = box_ref.left + margin + step * (index + 1)
+            y = box_ref.top if side == 'top' else box_ref.bot
+            return (x, y)
+        else:  # left or right
+            if count == 1:
+                y = box_ref.cy
+            else:
+                avail = max((box_ref.top - box_ref.bot) - 2 * margin, 0)
+                step = avail / (count + 1) if count > 1 else 0
+                y = box_ref.bot + margin + step * (index + 1)
+            x = box_ref.left if side == 'left' else box_ref.right
+            return (x, y)
+
+    def _adjust_channel(self, x: float, y_start: float, y_end: float) -> float:
+        """
+        수직 채널 x 좌표가 박스 테두리 근처이면 자동 오프셋.
+        반환: 보정된 x 좌표.
+        """
+        y_lo = min(y_start, y_end)
+        y_hi = max(y_start, y_end)
+        for box in self._box_refs:
+            # y 범위가 겹치는지 확인
+            if y_hi < box.bot or y_lo > box.top:
+                continue
+            if abs(x - box.left) < CHANNEL_CLEARANCE:
+                x = box.left - CHANNEL_CLEARANCE
+            elif abs(x - box.right) < CHANNEL_CLEARANCE:
+                x = box.right + CHANNEL_CLEARANCE
+        return x
+
+    def _apply_channel_avoidance(self, pts: list) -> list:
+        """
+        경로 pts에서 수직 세그먼트의 x 좌표를 _adjust_channel()로 보정.
+        순수 수직 세그먼트(x0 == x1, y0 != y1)만 검사.
+        반환: 보정된 pts (새 리스트).
+        """
+        if len(pts) < 2 or not self._box_refs:
+            return pts
+        pts = list(pts)
+        for i in range(len(pts) - 1):
+            x0, y0 = pts[i]
+            x1, y1 = pts[i + 1]
+            if abs(x0 - x1) < 1e-4 and abs(y0 - y1) > 0.05:
+                # 수직 세그먼트
+                new_x = self._adjust_channel(x0, y0, y1)
+                if abs(new_x - x0) > 1e-4:
+                    # x 좌표 보정: 이 점과 연속된 같은 x를 가진 점들도 함께 보정
+                    pts[i] = (new_x, pts[i][1])
+                    pts[i + 1] = (new_x, pts[i + 1][1])
+        return pts
+
+    def _resolve_arrow_v_h(self):
+        """
+        arrow_v / arrow_h 명령을 route 명령으로 변환.
+        도착점 자동 분산(arrival spreading) 적용.
+        이 메서드는 _render_all() 호출 전에 실행됨.
+        """
+        # 레지스트리에서 각 그룹의 도착 순서 인덱스 계산
+        arrival_order: dict = {}  # cmd_idx → (count, local_index)
+        for key, indices in self._arrival_registry.items():
+            count = len(indices)
+            for local_idx, cmd_idx in enumerate(indices):
+                arrival_order[cmd_idx] = (count, local_idx)
+
+        new_cmds = []
+        for i, cmd in enumerate(self._cmds):
+            if cmd[0] == 'arrow_v':
+                _, src_box, dst_box, label, dst_offset, side = cmd
+                # 출발점 (src side)
+                src_side = 'top' if side == 'bottom' else 'bottom'
+                # src에서 출발: 중심 (src_offset 없으면)
+                sx, sy = getattr(src_box, f'{src_side}_mid')()
+                # 도착점 계산
+                if dst_offset != 0.0:
+                    # 수동 offset (중심 x ± dst_offset)
+                    dx_final = dst_box.cx + dst_offset
+                    dy_final = dst_box.top if side == 'top' else dst_box.bot
+                    ex, ey = dx_final, dy_final
+                else:
+                    count, local_idx = arrival_order.get(i, (1, 0))
+                    ex, ey = self._spread_arrival(dst_box, side, count, local_idx)
+                new_cmds.append(('route', [(sx, sy), (ex, ey)], label, None, None))
+            elif cmd[0] == 'arrow_h':
+                _, src_box, dst_box, label, dst_offset, side = cmd
+                src_side = 'right' if side == 'left' else 'left'
+                sx, sy = getattr(src_box, f'{src_side}_mid')()
+                if dst_offset != 0.0:
+                    ex_final = dst_box.left if side == 'left' else dst_box.right
+                    ey_final = dst_box.cy + dst_offset
+                    ex, ey = ex_final, ey_final
+                else:
+                    count, local_idx = arrival_order.get(i, (1, 0))
+                    ex, ey = self._spread_arrival(dst_box, side, count, local_idx)
+                new_cmds.append(('route', [(sx, sy), (ex, ey)], label, None, None))
+            else:
+                new_cmds.append(cmd)
+        self._cmds = new_cmds
+        self._arrival_registry.clear()
 
     def _get_text_rect(self, shape_type, w, h):
         """도형 내부 유효 텍스트 영역(내접 직사각형) 반환.
